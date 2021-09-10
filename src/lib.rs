@@ -297,6 +297,10 @@ enum SurfaceFormat {
     #[br(magic = 0x0b06u32)]
     R8G8B8A8_SRGB,
 
+    #[br(magic = 0x2001)]
+    BC7_UNORM,
+    // TODO: Fill in other known formats.
+
     Unknown(u32),
 }
 
@@ -304,6 +308,7 @@ impl BinWrite for SurfaceFormat {
     fn write_options<W: io::Write>(&self, writer: &mut W, options: &WriterOption) -> io::Result<()> {
         match self {
             SurfaceFormat::R8G8B8A8_SRGB => 0x0b06,
+            SurfaceFormat::BC7_UNORM => 0x2001,
             SurfaceFormat::Unknown(x) => *x,
         }.write_options(writer, options)
     }
@@ -326,7 +331,7 @@ struct BrtiSection {
     height: u32,
     depth: u32,
     array_len: u32,
-    size_range: i32,
+    block_height_log2: u32,
     unk4: [u32; 6],
     image_size: u32,
     align: u32,
@@ -362,7 +367,7 @@ impl BrtiSection {
                 self.height,
                 self.depth,
                 self.array_len,
-                self.size_range,
+                self.block_height_log2,
                 self.unk4,
                 self.image_size,
                 self.align,
@@ -439,6 +444,8 @@ impl BntxFile {
     pub fn to_image(&self) -> image::DynamicImage {
         let info: &BrtiSection = &self.nx_header.info_ptr;
 
+        // TODO: This assumes that the input format is RGBA?
+        // TODO: Use the existing swizzle function.
         let data = tegra_swizzle::deswizzle(
             info.width, info.height, info.depth,
             1,
@@ -447,7 +454,7 @@ impl BntxFile {
             false,
             4,
             info.tile_mode as _,
-            info.size_range,
+            info.block_height_log2 as i32,
             &info.texture.0
         );
 
@@ -658,7 +665,7 @@ impl BntxFile {
                     height,
                     depth: 1,
                     array_len: 1,
-                    size_range: 4,
+                    block_height_log2: 4,
                     unk4: [
                         65543,
                         0,
