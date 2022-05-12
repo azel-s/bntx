@@ -1,8 +1,8 @@
-use std::{fmt, io};
-use std::path::Path;
-use binread::prelude::*;
 use binread::derive_binread;
+use binread::prelude::*;
 use binread::{FilePtr16, FilePtr32, FilePtr64, NullString};
+use std::path::Path;
+use std::{fmt, io};
 
 use binwrite::{BinWrite, WriterOption};
 
@@ -52,11 +52,10 @@ impl BntxHeader {
         &self,
         writer: &mut W,
         options: &WriterOption,
-        parent: &BntxFile
+        parent: &BntxFile,
     ) -> io::Result<()> {
-        let start_of_reloc_section = (
-            START_OF_TEXTURE_DATA + parent.nx_header.info_ptr.texture.0.len()
-        ) as u32;
+        let start_of_reloc_section =
+            (START_OF_TEXTURE_DATA + parent.nx_header.info_ptr.texture.0.len()) as u32;
         (
             b"BNTX",
             0u32,
@@ -71,7 +70,8 @@ impl BntxHeader {
             START_OF_STR_SECTION as u16,
             start_of_reloc_section,
             start_of_reloc_section + (self.inner.reloc_table.get_size() as u32),
-        ).write_options(writer, options)
+        )
+            .write_options(writer, options)
     }
 }
 
@@ -120,13 +120,13 @@ const SIZE_OF_RELOC_ENTRY: usize = size_of::<u32>() + size_of::<u16>() + (size_o
 struct RelocationTable {
     #[br(temp)]
     rlt_section_pos: u32,
-    
+
     #[br(temp)]
     count: u32,
 
     #[br(pad_before = 4, count = count)]
     sections: Vec<RelocationSection>,
-    
+
     #[br(count = sections.iter().map(|x| x.count).sum::<u32>())]
     entries: Vec<RelocationEntry>,
 }
@@ -135,23 +135,29 @@ use core::mem::size_of;
 
 impl RelocationTable {
     fn get_size(&self) -> usize {
-        b"_RLT".len() +
-        size_of::<u32>() +
-        size_of::<u32>() +
-        size_of::<u32>() +
-        (self.sections.len() * SIZE_OF_RELOC_SECTION) +
-        (self.entries.len() * SIZE_OF_RELOC_ENTRY)
+        b"_RLT".len()
+            + size_of::<u32>()
+            + size_of::<u32>()
+            + size_of::<u32>()
+            + (self.sections.len() * SIZE_OF_RELOC_SECTION)
+            + (self.entries.len() * SIZE_OF_RELOC_ENTRY)
     }
 
-    fn write_options<W: io::Write>(&self, writer: &mut W, options: &WriterOption, parent: &BntxFile) -> io::Result<()> {
+    fn write_options<W: io::Write>(
+        &self,
+        writer: &mut W,
+        options: &WriterOption,
+        parent: &BntxFile,
+    ) -> io::Result<()> {
         (
             b"_RLT",
             (START_OF_TEXTURE_DATA + parent.nx_header.info_ptr.texture.0.len()) as u32,
             self.sections.len() as u32,
             0u32,
             &self.sections,
-            &self.entries
-        ).write_options(writer, options)
+            &self.entries,
+        )
+            .write_options(writer, options)
     }
 }
 
@@ -174,7 +180,11 @@ struct StrSection {
 }
 
 impl BinWrite for StrSection {
-    fn write_options<W: io::Write>(&self, writer: &mut W, options: &WriterOption) -> io::Result<()> {
+    fn write_options<W: io::Write>(
+        &self,
+        writer: &mut W,
+        options: &WriterOption,
+    ) -> io::Result<()> {
         (
             b"_STR",
             self.unk,
@@ -183,7 +193,8 @@ impl BinWrite for StrSection {
             self.strings.len() as u32,
             BntxStr::from(String::new()),
             &self.strings,
-        ).write_options(writer, options)
+        )
+            .write_options(writer, options)
     }
 }
 
@@ -191,9 +202,7 @@ impl StrSection {
     fn get_size(&self) -> usize {
         (5 * size_of::<u32>())
             + EMPTY_STR_SIZE
-            + self.strings.iter()
-                .map(|x| x.get_size())
-                .sum::<usize>()
+            + self.strings.iter().map(|x| x.get_size()).sum::<usize>()
     }
 }
 
@@ -213,12 +222,7 @@ fn align(x: usize, n: usize) -> usize {
 
 impl BntxStr {
     fn get_size(&self) -> usize {
-        align(
-            size_of::<u16>()
-                + self.chars.bytes().len()
-                + 1,
-            4
-        )
+        align(size_of::<u16>() + self.chars.bytes().len() + 1, 4)
     }
 }
 
@@ -226,7 +230,7 @@ impl From<String> for BntxStr {
     fn from(chars: String) -> Self {
         BntxStr {
             len: chars.len() as u16,
-            chars
+            chars,
         }
     }
 }
@@ -260,7 +264,7 @@ impl NxHeader {
         &self,
         writer: &mut W,
         options: &WriterOption,
-        parent: &BntxFile
+        parent: &BntxFile,
     ) -> io::Result<()> {
         (
             b"NX  ",
@@ -269,7 +273,8 @@ impl NxHeader {
             BRTD_SECTION_START as u64,
             (START_OF_STR_SECTION + parent.header.inner.str_section.get_size()) as u64,
             self.dict_size,
-        ).write_options(writer, options)
+        )
+            .write_options(writer, options)
     }
 }
 
@@ -288,7 +293,11 @@ impl DictSection {
 }
 
 impl BinWrite for DictSection {
-    fn write_options<W: io::Write>(&self, writer: &mut W, options: &WriterOption) -> io::Result<()> {
+    fn write_options<W: io::Write>(
+        &self,
+        writer: &mut W,
+        options: &WriterOption,
+    ) -> io::Result<()> {
         DICT_SECTION.write_options(writer, options)
     }
 }
@@ -301,17 +310,21 @@ enum SurfaceFormat {
     #[br(magic = 0x2001)]
     BC7_UNORM,
     // TODO: Fill in other known formats.
-
     Unknown(u32),
 }
 
 impl BinWrite for SurfaceFormat {
-    fn write_options<W: io::Write>(&self, writer: &mut W, options: &WriterOption) -> io::Result<()> {
+    fn write_options<W: io::Write>(
+        &self,
+        writer: &mut W,
+        options: &WriterOption,
+    ) -> io::Result<()> {
         match self {
             SurfaceFormat::R8G8B8A8_SRGB => 0x0b06,
             SurfaceFormat::BC7_UNORM => 0x2001,
             SurfaceFormat::Unknown(x) => *x,
-        }.write_options(writer, options)
+        }
+        .write_options(writer, options)
     }
 }
 
@@ -350,7 +363,12 @@ struct BrtiSection {
 const SIZE_OF_BRTI: usize = 0xA0;
 
 impl BrtiSection {
-    fn write_options<W: io::Write>(&self, writer: &mut W, options: &WriterOption, parent: &BntxFile) -> io::Result<()> {
+    fn write_options<W: io::Write>(
+        &self,
+        writer: &mut W,
+        options: &WriterOption,
+        parent: &BntxFile,
+    ) -> io::Result<()> {
         (
             (
                 b"BRTI",
@@ -377,46 +395,39 @@ impl BrtiSection {
             self.ty,
             FILENAME_STR_OFFSET as u64,
             BNTX_HEADER_SIZE as u64,
-            (
-                START_OF_STR_SECTION +
-                parent.header.inner.str_section.get_size() +
-                parent.nx_header.dict.get_size() +
-                SIZE_OF_BRTI +
-                0x200
-            ) as u64,
+            (START_OF_STR_SECTION
+                + parent.header.inner.str_section.get_size()
+                + parent.nx_header.dict.get_size()
+                + SIZE_OF_BRTI
+                + 0x200) as u64,
             0u64,
-            (
-                START_OF_STR_SECTION +
-                parent.header.inner.str_section.get_size() +
-                parent.nx_header.dict.get_size() +
-                SIZE_OF_BRTI
-            ) as u64,
-            (
-                START_OF_STR_SECTION +
-                parent.header.inner.str_section.get_size() +
-                parent.nx_header.dict.get_size() +
-                SIZE_OF_BRTI +
-                0x100
-            ) as u64,
+            (START_OF_STR_SECTION
+                + parent.header.inner.str_section.get_size()
+                + parent.nx_header.dict.get_size()
+                + SIZE_OF_BRTI) as u64,
+            (START_OF_STR_SECTION
+                + parent.header.inner.str_section.get_size()
+                + parent.nx_header.dict.get_size()
+                + SIZE_OF_BRTI
+                + 0x100) as u64,
             0u64,
-            0u64
-        ).write_options(writer, options)
+            0u64,
+        )
+            .write_options(writer, options)
     }
 }
 
-use binread::{io::{Read, Seek}, ReadOptions};
+use binread::{
+    io::{Read, Seek},
+    ReadOptions,
+};
 
 fn read_double_indirect<T: BinRead, R: Read + Seek>(
     reader: &mut R,
     options: &ReadOptions,
-    args: T::Args
+    args: T::Args,
 ) -> BinResult<T> {
-
-    let mut data = <FilePtr64<FilePtr64<T>> as BinRead>::read_options(
-        reader,
-        options,
-        args
-    )?;
+    let mut data = <FilePtr64<FilePtr64<T>> as BinRead>::read_options(reader, options, args)?;
 
     data.after_parse(reader, options, args)?;
 
@@ -460,10 +471,10 @@ impl BntxFile {
         .unwrap();
 
         let base_size = info.width as usize * info.height as usize * 4;
-        
+
         image::DynamicImage::ImageRgba8(
             image::RgbaImage::from_raw(info.width, info.height, data[..base_size].to_owned())
-                .unwrap()
+                .unwrap(),
         )
     }
 
@@ -475,33 +486,29 @@ impl BntxFile {
         (
             // memory pool
             &[0u8; 0x150][..],
-            (
-                START_OF_STR_SECTION
-                    + self.header.inner.str_section.get_size()
-                    + self.nx_header.dict.get_size()
-            ) as u64,
+            (START_OF_STR_SECTION
+                + self.header.inner.str_section.get_size()
+                + self.nx_header.dict.get_size()) as u64,
             &self.header.inner.str_section,
             &self.nx_header.dict,
-        ).write_options(writer, &options)?;
+        )
+            .write_options(writer, &options)?;
 
+        self.nx_header
+            .info_ptr
+            .write_options(writer, &options, self)?;
 
-        self.nx_header.info_ptr.write_options(writer, &options, self)?;
-
-        (
-            &[0; 0x100][..],
-            &[0; 0x100][..],
-        ).write_options(writer, &options)?;
+        (&[0; 0x100][..], &[0; 0x100][..]).write_options(writer, &options)?;
 
         0x1000u64.write_options(writer, &options)?;
 
-        let padding_size = BRTD_SECTION_START - (
-            START_OF_STR_SECTION +
-            self.header.inner.str_section.get_size() +
-            self.nx_header.dict.get_size() +
-            SIZE_OF_BRTI +
-            0x200 +
-            DATA_PTR_SIZE
-        );
+        let padding_size = BRTD_SECTION_START
+            - (START_OF_STR_SECTION
+                + self.header.inner.str_section.get_size()
+                + self.nx_header.dict.get_size()
+                + SIZE_OF_BRTI
+                + 0x200
+                + DATA_PTR_SIZE);
 
         vec![0u8; padding_size].write_options(writer, &options)?;
 
@@ -509,13 +516,16 @@ impl BntxFile {
         (
             b"BRTD",
             0,
-            self.nx_header.info_ptr.texture.0.len() as u64 + 0x10
-        ).write_options(writer, &options)?;
-        
+            self.nx_header.info_ptr.texture.0.len() as u64 + 0x10,
+        )
+            .write_options(writer, &options)?;
 
         writer.write_all(&self.nx_header.info_ptr.texture.0)?;
 
-        self.header.inner.reloc_table.write_options(writer, &options, self)?;
+        self.header
+            .inner
+            .reloc_table
+            .write_options(writer, &options, self)?;
 
         Ok(())
     }
@@ -524,7 +534,7 @@ impl BntxFile {
         let img = img.to_rgba8();
 
         let (width, height) = img.dimensions();
-        
+
         let data = img.into_raw();
 
         let data = swizzle_surface(
@@ -563,13 +573,11 @@ impl BntxFile {
                             RelocationSection {
                                 pointer: 0,
                                 position: 0,
-                                size: (
-                                    START_OF_STR_SECTION +
-                                    str_section_size +
-                                    dict_section_size +
-                                    SIZE_OF_BRTI +
-                                    0x208
-                                ) as u32,
+                                size: (START_OF_STR_SECTION
+                                    + str_section_size
+                                    + dict_section_size
+                                    + SIZE_OF_BRTI
+                                    + 0x208) as u32,
                                 index: 0,
                                 count: 4,
                             },
@@ -586,68 +594,51 @@ impl BntxFile {
                                 position: BNTX_HEADER_SIZE as u32 + 8,
                                 struct_count: 2,
                                 offset_count: 1,
-                                padding_count: (
-                                    (
-                                        (HEADER_SIZE + MEM_POOL_SIZE) - (BNTX_HEADER_SIZE + 0x10)
-                                    ) / 8
-                                ) as u8,
+                                padding_count: (((HEADER_SIZE + MEM_POOL_SIZE)
+                                    - (BNTX_HEADER_SIZE + 0x10))
+                                    / 8) as u8,
                             },
                             RelocationEntry {
                                 position: BNTX_HEADER_SIZE as u32 + 0x18,
                                 struct_count: 2,
                                 offset_count: 2,
-                                padding_count: (
-                                    (
-                                        START_OF_STR_SECTION
-                                            + str_section_size
-                                            + dict_section_size
-                                            + 0x80
-                                            - HEADER_SIZE
-                                    ) / 8
-                                ) as u8,
+                                padding_count: ((START_OF_STR_SECTION
+                                    + str_section_size
+                                    + dict_section_size
+                                    + 0x80
+                                    - HEADER_SIZE)
+                                    / 8) as u8,
                             },
                             RelocationEntry {
-                                position:(
-                                    START_OF_STR_SECTION
-                                        + str_section_size
-                                        + 0x10
-                                ) as u32,
+                                position: (START_OF_STR_SECTION + str_section_size + 0x10) as u32,
                                 struct_count: 2,
                                 offset_count: 1,
                                 padding_count: 1,
                             },
                             RelocationEntry {
-                                position:(
-                                    START_OF_STR_SECTION
-                                        + str_section_size
-                                        + dict_section_size
-                                        + 0x60
-                                ) as u32,
+                                position: (START_OF_STR_SECTION
+                                    + str_section_size
+                                    + dict_section_size
+                                    + 0x60) as u32,
                                 struct_count: 1,
                                 offset_count: 3,
                                 padding_count: 0,
                             },
                             RelocationEntry {
-                                position:(
-                                    BNTX_HEADER_SIZE + 0x10
-                                ) as u32,
+                                position: (BNTX_HEADER_SIZE + 0x10) as u32,
                                 struct_count: 2,
                                 offset_count: 1,
-                                padding_count: (
-                                    (
-                                        (
-                                            START_OF_STR_SECTION
-                                                + str_section_size
-                                                + dict_section_size
-                                                + SIZE_OF_BRTI
-                                                + 0x200
-                                        ) - (BNTX_HEADER_SIZE + 0x18)
-                                    ) / 8
-                                ) as u8,
-                            }
-                        ]
-                    }
-                }
+                                padding_count: (((START_OF_STR_SECTION
+                                    + str_section_size
+                                    + dict_section_size
+                                    + SIZE_OF_BRTI
+                                    + 0x200)
+                                    - (BNTX_HEADER_SIZE + 0x18))
+                                    / 8) as u8,
+                            },
+                        ],
+                    },
+                },
             },
             nx_header: NxHeader {
                 dict: DictSection {},
@@ -668,23 +659,16 @@ impl BntxFile {
                     depth: 1,
                     array_len: 1,
                     block_height_log2: 4,
-                    unk4: [
-                        65543,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                    ],
+                    unk4: [65543, 0, 0, 0, 0, 0],
                     image_size: data.len() as _,
                     align: 512,
                     comp_sel: 84148994,
                     ty: 1,
                     name_addr: name.to_owned().into(),
                     parent_addr: 32,
-                    texture: ImageData(data)
-                }
-            }
+                    texture: ImageData(data),
+                },
+            },
         }
     }
 
@@ -697,9 +681,9 @@ impl BntxFile {
 
 #[cfg(test)]
 mod tests {
-    use binread::prelude::*;
-    use binread::io::*;
     use super::BntxFile;
+    use binread::io::*;
+    use binread::prelude::*;
 
     /*
     #[test]
