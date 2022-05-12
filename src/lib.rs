@@ -6,7 +6,8 @@ use binread::{FilePtr16, FilePtr32, FilePtr64, NullString};
 
 use binwrite::{BinWrite, WriterOption};
 
-pub mod tegra_swizzle;
+use tegra_swizzle::surface::{deswizzle_surface, swizzle_surface, BlockDim};
+use tegra_swizzle::BlockHeight;
 
 #[derive(BinRead, PartialEq, Debug, Clone, Copy)]
 enum ByteOrder {
@@ -444,19 +445,19 @@ impl BntxFile {
     pub fn to_image(&self) -> image::DynamicImage {
         let info: &BrtiSection = &self.nx_header.info_ptr;
 
-        // TODO: This assumes that the input format is RGBA?
-        // TODO: Use the existing swizzle function.
-        let data = tegra_swizzle::deswizzle(
-            info.width, info.height, info.depth,
-            1,
-            1,
-            1,
-            false,
+        // TODO: Don't assume RGBA.
+        let data = deswizzle_surface(
+            info.width as usize,
+            info.height as usize,
+            info.depth as usize,
+            &info.texture.0,
+            BlockDim::uncompressed(),
+            Some(BlockHeight::new(2u32.pow(info.block_height_log2) as usize).unwrap()),
             4,
-            info.tile_mode as _,
-            info.block_height_log2 as i32,
-            &info.texture.0
-        );
+            1,
+            1,
+        )
+        .unwrap();
 
         let base_size = info.width as usize * info.height as usize * 4;
         
@@ -526,17 +527,18 @@ impl BntxFile {
         
         let data = img.into_raw();
 
-        let data = tegra_swizzle::swizzle(
-            width, height, 1,
+        let data = swizzle_surface(
+            width as usize,
+            height as usize,
             1,
-            1,
-            1,
-            false,
+            &data,
+            BlockDim::uncompressed(),
+            None,
             4,
-            0,
-            if width <= 64 && height <= 64 { 3 } else { 4 },
-            &data
-        );
+            1,
+            1,
+        )
+        .unwrap();
 
         let str_section = StrSection {
             unk: 0x48,
