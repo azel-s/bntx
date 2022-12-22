@@ -1,11 +1,17 @@
 use binrw::binread;
+use binrw::binrw;
 use binrw::prelude::*;
 use binrw::{BinWrite, WriteOptions};
 use binrw::{FilePtr16, FilePtr32, FilePtr64, NullString};
+use std::error::Error;
 use std::path::Path;
 use std::{fmt, io};
 use tegra_swizzle::surface::{deswizzle_surface, swizzle_surface, BlockDim};
 use tegra_swizzle::BlockHeight;
+
+// TODO: Add module level docs for basic usage.
+// TODO: Make this optional.
+pub mod dds;
 
 #[derive(BinRead, PartialEq, Debug, Clone, Copy)]
 enum ByteOrder {
@@ -78,7 +84,7 @@ impl BntxHeader {
 struct HeaderInner {
     revision: u16,
 
-    #[br(parse_with = FilePtr32::parse, map = NullString::into_string)]
+    #[br(parse_with = FilePtr32::parse, map = |x: NullString| x.to_string())]
     file_name: String,
 
     #[br(pad_before = 2, parse_with = FilePtr16::parse)]
@@ -329,32 +335,28 @@ impl BinWrite for DictSection {
     }
 }
 
-#[derive(BinRead, Debug)]
+#[binrw]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[brw(repr(u32))]
 enum SurfaceFormat {
-    #[br(magic = 0x0b06u32)]
-    R8G8B8A8_SRGB,
-
-    #[br(magic = 0x2001u32)]
-    BC7_UNORM,
+    R8G8B8A8Srgb = 0x0b06,
+    BC7Unorm = 0x2001,
     // TODO: Fill in other known formats.
-    Unknown(u32),
 }
 
-impl BinWrite for SurfaceFormat {
-    type Args = ();
-
-    fn write_options<W: io::Write + io::Seek>(
-        &self,
-        writer: &mut W,
-        options: &WriteOptions,
-        args: Self::Args,
-    ) -> Result<(), binrw::error::Error> {
+impl SurfaceFormat {
+    fn bytes_per_pixel(&self) -> usize {
         match self {
-            SurfaceFormat::R8G8B8A8_SRGB => 0x0b06,
-            SurfaceFormat::BC7_UNORM => 0x2001,
-            SurfaceFormat::Unknown(x) => *x,
+            SurfaceFormat::R8G8B8A8Srgb => 4,
+            SurfaceFormat::BC7Unorm => 16,
         }
-        .write_options(writer, options, ())
+    }
+
+    fn block_dim(&self) -> BlockDim {
+        match self {
+            SurfaceFormat::R8G8B8A8Srgb => BlockDim::uncompressed(),
+            SurfaceFormat::BC7Unorm => BlockDim::block_4x4(),
+        }
     }
 }
 
@@ -374,7 +376,7 @@ struct BrtiSection {
     width: u32,
     height: u32,
     depth: u32,
-    array_len: u32,
+    layer_count: u32,
     block_height_log2: u32,
     unk4: [u32; 6],
     image_size: u32,
@@ -415,7 +417,7 @@ impl BrtiSection {
                 self.width,
                 self.height,
                 self.depth,
-                self.array_len,
+                self.layer_count,
                 self.block_height_log2,
                 self.unk4,
                 self.image_size,
@@ -488,28 +490,36 @@ pub struct BntxFile {
 // TODO: Add DDS support similar to nutexb.
 impl BntxFile {
     pub fn to_image(&self) -> image::DynamicImage {
-        let info: &BrtiSection = &self.nx_header.info_ptr;
+        let info = &self.nx_header.info_ptr;
+
+        let data = self.deswizzled_data().unwrap();
 
         // TODO: Don't assume RGBA.
-        let data = deswizzle_surface(
-            info.width as usize,
-            info.height as usize,
-            info.depth as usize,
-            &info.texture.0,
-            BlockDim::uncompressed(),
-            Some(BlockHeight::new(2u32.pow(info.block_height_log2) as usize).unwrap()),
-            4,
-            1,
-            1,
-        )
-        .unwrap();
-
+        // TODO: Error if not RGBA?
         let base_size = info.width as usize * info.height as usize * 4;
 
         image::DynamicImage::ImageRgba8(
             image::RgbaImage::from_raw(info.width, info.height, data[..base_size].to_owned())
                 .unwrap(),
         )
+    }
+
+    /// The deswizzled image data for all layers and mipmaps.
+    pub fn deswizzled_data(&self) -> Result<Vec<u8>, Box<dyn Error>> {
+        let info = &self.nx_header.info_ptr;
+
+        deswizzle_surface(
+            info.width as usize,
+            info.height as usize,
+            info.depth as usize,
+            &info.texture.0,
+            info.format.block_dim(),
+            Some(BlockHeight::new(2u32.pow(info.block_height_log2) as usize).unwrap()),
+            info.format.bytes_per_pixel(),
+            info.mips_count as usize,
+            info.layer_count as usize,
+        )
+        .map_err(Into::into)
     }
 
     pub fn write<W: io::Write + io::Seek>(
@@ -547,7 +557,7 @@ impl BntxFile {
                 + 0x200
                 + DATA_PTR_SIZE);
 
-                dbg!(padding_size);
+        dbg!(padding_size);
         vec![0u8; padding_size].write_options(writer, &options, ())?;
 
         // BRTD
@@ -690,12 +700,12 @@ impl BntxFile {
                     swizzle: 0,
                     mips_count: 1,
                     num_multi_sample: 1,
-                    format: SurfaceFormat::R8G8B8A8_SRGB,
+                    format: SurfaceFormat::R8G8B8A8Srgb,
                     unk2: 32,
                     width,
                     height,
                     depth: 1,
-                    array_len: 1,
+                    layer_count: 1,
                     block_height_log2: 4,
                     unk4: [65543, 0, 0, 0, 0, 0],
                     image_size: data.len() as _,
@@ -719,33 +729,24 @@ impl BntxFile {
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufReader;
-
     use super::BntxFile;
-    use binrw::io::*;
+    use crate::dds::create_dds;
     use binrw::prelude::*;
+    use std::io::BufReader;
+    use std::io::BufWriter;
 
-    /*
     #[test]
     fn try_parse() {
-        let mut data = Cursor::new(&include_bytes!("/home/jam/Downloads/ester.bntx")[..]);
-        //let mut data = Cursor::new(&include_bytes!("/home/jam/dev/ult/bntx/test.bntx")[..]);
-
+        let mut data = BufReader::new(std::fs::File::open("spirits_0_abra.bntx").unwrap());
         let test: BntxFile = data.read_le().unwrap();
 
         dbg!(&test);
 
-        test.to_image()
-            .save("test.png");
-    }
-    */
+        let mut writer = BufWriter::new(std::fs::File::create("spirits_0_abra.out.bntx").unwrap());
+        test.write(&mut writer).unwrap();
 
-    #[test]
-    fn try_from_png() {
-        let image = image::open("/home/jam/dev/ult/bntx/test.png").unwrap();
-
-        let tex = BntxFile::from_image(image, "ester");
-
-        tex.save("test.bntx").unwrap();
+        let dds = create_dds(&test).unwrap();
+        let mut writer = BufWriter::new(std::fs::File::create("spirits_0_abra.dds").unwrap());
+        dds.write(&mut writer).unwrap();
     }
 }
