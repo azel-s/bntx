@@ -6,6 +6,8 @@ use binrw::{FilePtr16, FilePtr32, FilePtr64, NullString};
 use std::error::Error;
 use std::path::Path;
 use std::{fmt, io};
+use tegra_swizzle::block_height_mip0;
+use tegra_swizzle::div_round_up;
 use tegra_swizzle::surface::{deswizzle_surface, swizzle_surface, BlockDim};
 use tegra_swizzle::BlockHeight;
 
@@ -578,25 +580,62 @@ impl BntxFile {
         Ok(())
     }
 
-    pub fn from_image(img: image::DynamicImage, name: &str) -> Self {
+    pub fn from_image(img: image::DynamicImage, name: &str) -> Result<Self, Box<dyn Error>> {
         let img = img.to_rgba8();
 
         let (width, height) = img.dimensions();
 
         let data = img.into_raw();
 
+        // TODO: This should fail if the format isn't RGBA8 already.
+        Self::from_image_data(
+            name,
+            width,
+            height,
+            1,
+            1,
+            1,
+            SurfaceFormat::R8G8B8A8Srgb,
+            &data,
+        )
+    }
+
+    /// Create a [BntxFile] from unswizzled image data.
+    fn from_image_data(
+        name: &str,
+        width: u32,
+        height: u32,
+        depth: u32,
+        mips_count: u32,
+        layer_count: u32,
+        format: SurfaceFormat,
+        data: &[u8],
+    ) -> Result<Self, Box<dyn Error>> {
+        // Let tegra_swizzle calculate the block height.
+        // This matches the value inferred for missing block heights like in nutexb.
+        let block_dim = format.block_dim();
+        let block_height = block_height_mip0(div_round_up(height as usize, block_dim.height.get()));
+
+        let block_height_log2 = match block_height {
+            BlockHeight::One => 0,
+            BlockHeight::Two => 1,
+            BlockHeight::Four => 2,
+            BlockHeight::Eight => 3,
+            BlockHeight::Sixteen => 4,
+            BlockHeight::ThirtyTwo => 5,
+        };
+
         let data = swizzle_surface(
             width as usize,
             height as usize,
-            1,
+            depth as usize,
             &data,
-            BlockDim::uncompressed(),
-            None,
-            4,
-            1,
-            1,
-        )
-        .unwrap();
+            block_dim,
+            Some(block_height),
+            format.bytes_per_pixel(),
+            mips_count as usize,
+            layer_count as usize,
+        )?;
 
         let str_section = StrSection {
             unk: 0x48,
@@ -608,7 +647,7 @@ impl BntxFile {
         let str_section_size = str_section.get_size();
         let dict_section_size = (DictSection {}).get_size();
 
-        BntxFile {
+        Ok(Self {
             header: BntxHeader {
                 version: (0, 4),
                 bom: ByteOrder::LittleEndian,
@@ -698,15 +737,15 @@ impl BntxFile {
                     dim: 2,
                     tile_mode: 0,
                     swizzle: 0,
-                    mips_count: 1,
+                    mips_count: mips_count as u16,
                     num_multi_sample: 1,
-                    format: SurfaceFormat::R8G8B8A8Srgb,
+                    format,
                     unk2: 32,
                     width,
                     height,
-                    depth: 1,
-                    layer_count: 1,
-                    block_height_log2: 4,
+                    depth,
+                    layer_count,
+                    block_height_log2,
                     unk4: [65543, 0, 0, 0, 0, 0],
                     image_size: data.len() as _,
                     align: 512,
@@ -717,7 +756,7 @@ impl BntxFile {
                     texture: ImageData(data),
                 },
             },
-        }
+        })
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), binrw::error::Error> {
@@ -730,6 +769,7 @@ impl BntxFile {
 #[cfg(test)]
 mod tests {
     use super::BntxFile;
+    use crate::dds::create_bntx;
     use crate::dds::create_dds;
     use binrw::prelude::*;
     use std::io::BufReader;
@@ -748,5 +788,11 @@ mod tests {
         let dds = create_dds(&test).unwrap();
         let mut writer = BufWriter::new(std::fs::File::create("spirits_0_abra.dds").unwrap());
         dds.write(&mut writer).unwrap();
+
+        let mut writer = BufWriter::new(std::fs::File::create("spirits_0_abra.dds.bntx").unwrap());
+        create_bntx("spirts_0_abra", &dds)
+            .unwrap()
+            .write(&mut writer)
+            .unwrap();
     }
 }

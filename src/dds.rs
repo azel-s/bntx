@@ -1,4 +1,7 @@
-use std::error::Error;
+use std::{
+    convert::{TryFrom, TryInto},
+    error::Error,
+};
 
 use ddsfile::{AlphaMode, Caps2, D3D10ResourceDimension, Dds, DxgiFormat, NewDxgiParams};
 
@@ -35,13 +38,42 @@ pub fn create_dds(bntx: &BntxFile) -> Result<Dds, Box<dyn Error>> {
     Ok(dds)
 }
 
-// TODO: Support the other conversion direction.
+// TODO: Make this a method?
+pub fn create_bntx(name: &str, dds: &Dds) -> Result<BntxFile, Box<dyn Error>> {
+    BntxFile::from_image_data(
+        name,
+        dds.get_width(),
+        dds.get_height(),
+        dds.get_depth(),
+        dds.get_num_mipmap_levels(),
+        dds.get_num_array_layers(),
+        dds.get_dxgi_format()
+            .ok_or("Only DXGI DDS files are supported".to_string())?
+            .try_into()?,
+        &dds.data,
+    )
+}
 
 impl From<SurfaceFormat> for DxgiFormat {
     fn from(f: SurfaceFormat) -> Self {
         match f {
             SurfaceFormat::R8G8B8A8Srgb => DxgiFormat::R8G8B8A8_UNorm_sRGB,
             SurfaceFormat::BC7Unorm => DxgiFormat::BC7_UNorm,
+        }
+    }
+}
+
+impl TryFrom<DxgiFormat> for SurfaceFormat {
+    type Error = String;
+
+    fn try_from(value: DxgiFormat) -> Result<Self, Self::Error> {
+        match value {
+            DxgiFormat::R8G8B8A8_UNorm_sRGB => Ok(Self::R8G8B8A8Srgb),
+            DxgiFormat::BC7_UNorm => Ok(Self::BC7Unorm),
+            _ => Err(format!(
+                "DDS DXGI format {:?} does not have a corresponding Nutexb format.",
+                value
+            )),
         }
     }
 }
