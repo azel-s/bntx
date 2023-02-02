@@ -240,7 +240,6 @@ impl BinWrite for BntxStr {
         // Align to 4 bytes.
         let pos = writer.stream_position()?;
         let new_pos = align(pos as usize, 4);
-        dbg!(pos, new_pos);
         for _ in 0..(new_pos - pos as usize) {
             0u8.write_options(writer, options, ())?;
         }
@@ -559,7 +558,6 @@ impl BntxFile {
                 + 0x200
                 + DATA_PTR_SIZE);
 
-        dbg!(padding_size);
         vec![0u8; padding_size].write_options(writer, &options, ())?;
 
         // BRTD
@@ -784,8 +782,6 @@ mod tests {
     fn try_parse() {
         let mut data = BufReader::new(std::fs::File::open("spirits_0_abra.bntx").unwrap());
         let test: BntxFile = data.read_le().unwrap();
-
-        dbg!(&test);
 
         let mut writer = BufWriter::new(std::fs::File::create("spirits_0_abra.out.bntx").unwrap());
         test.write(&mut writer).unwrap();
