@@ -759,6 +759,11 @@ impl BntxFile {
         })
     }
 
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, binrw::error::Error> {
+        let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+        reader.read_le()
+    }
+
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), binrw::error::Error> {
         let mut file = std::fs::File::create(path.as_ref())?;
 
