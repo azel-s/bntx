@@ -339,7 +339,7 @@ impl BinWrite for DictSection {
 #[binrw]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[brw(repr(u32))]
-enum SurfaceFormat {
+pub enum SurfaceFormat {
     R8G8B8A8Srgb = 0x0b06,
     BC7Unorm = 0x2001,
     // TODO: Fill in other known formats.
@@ -490,6 +490,31 @@ pub struct BntxFile {
 
 // TODO: Add DDS support similar to nutexb.
 impl BntxFile {
+    pub fn width(&self) -> u32 {
+        self.nx_header.info_ptr.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.nx_header.info_ptr.height
+    }
+
+    pub fn depth(&self) -> u32 {
+        self.nx_header.info_ptr.depth
+    }
+
+    pub fn num_array_layers(&self) -> u32 {
+        self.nx_header.info_ptr.layer_count
+    }
+
+    pub fn num_mipmaps(&self) -> u32 {
+        self.nx_header.info_ptr.mips_count as u32
+    }
+
+    pub fn image_format(&self) -> SurfaceFormat {
+        self.nx_header.info_ptr.format
+    }
+
+    // TODO: Remove this functionality?
     pub fn to_image(&self) -> image::DynamicImage {
         let info = &self.nx_header.info_ptr;
 
