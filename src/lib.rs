@@ -336,27 +336,79 @@ impl BinWrite for DictSection {
     }
 }
 
+// TODO: Are these flags?
 #[binrw]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[brw(repr(u32))]
 pub enum SurfaceFormat {
+    R8Unorm = 0x0201,
+    R8B8G8A8Unorm = 0x0b01,
     R8G8B8A8Srgb = 0x0b06,
+    B8G8R8A8Unorm = 0x0c01,
+    B8G8R8A8Srgb = 0x0c06,
+    BC1Unorm = 0x1a01,
+    BC1Srgb = 0x1a06,
+    BC2Unorm = 0x1b01,
+    BC2Srgb = 0x1b06,
+    BC3Unorm = 0x1c01,
+    BC3Srgb = 0x1c06,
+    BC4Unorm = 0x1d01,
+    BC4Snorm = 0x1d02,
+    BC5Unorm = 0x1e01,
+    BC5Snorm = 0x1e02,
+    BC6Sfloat = 0x1f05,
+    BC6Ufloat = 0x1f0a,
     BC7Unorm = 0x2001,
+    BC7Srgb = 0x2006,
     // TODO: Fill in other known formats.
 }
 
 impl SurfaceFormat {
     fn bytes_per_pixel(&self) -> usize {
         match self {
+            SurfaceFormat::R8Unorm => 1,
+            SurfaceFormat::R8B8G8A8Unorm => 4,
             SurfaceFormat::R8G8B8A8Srgb => 4,
+            SurfaceFormat::B8G8R8A8Unorm => 4,
+            SurfaceFormat::B8G8R8A8Srgb => 4,
+            SurfaceFormat::BC1Unorm => 8,
+            SurfaceFormat::BC1Srgb => 8,
+            SurfaceFormat::BC2Unorm => 16,
+            SurfaceFormat::BC2Srgb => 16,
+            SurfaceFormat::BC3Unorm => 16,
+            SurfaceFormat::BC3Srgb => 16,
+            SurfaceFormat::BC4Unorm => 8,
+            SurfaceFormat::BC4Snorm => 8,
+            SurfaceFormat::BC5Unorm => 16,
+            SurfaceFormat::BC5Snorm => 16,
+            SurfaceFormat::BC6Sfloat => 16,
+            SurfaceFormat::BC6Ufloat => 16,
             SurfaceFormat::BC7Unorm => 16,
+            SurfaceFormat::BC7Srgb => 16,
         }
     }
 
     fn block_dim(&self) -> BlockDim {
         match self {
+            SurfaceFormat::R8Unorm => BlockDim::uncompressed(),
+            SurfaceFormat::R8B8G8A8Unorm => BlockDim::uncompressed(),
             SurfaceFormat::R8G8B8A8Srgb => BlockDim::uncompressed(),
+            SurfaceFormat::B8G8R8A8Unorm => BlockDim::uncompressed(),
+            SurfaceFormat::B8G8R8A8Srgb => BlockDim::uncompressed(),
+            SurfaceFormat::BC1Unorm => BlockDim::block_4x4(),
+            SurfaceFormat::BC1Srgb => BlockDim::block_4x4(),
+            SurfaceFormat::BC2Unorm => BlockDim::block_4x4(),
+            SurfaceFormat::BC2Srgb => BlockDim::block_4x4(),
+            SurfaceFormat::BC3Unorm => BlockDim::block_4x4(),
+            SurfaceFormat::BC3Srgb => BlockDim::block_4x4(),
+            SurfaceFormat::BC4Unorm => BlockDim::block_4x4(),
+            SurfaceFormat::BC4Snorm => BlockDim::block_4x4(),
+            SurfaceFormat::BC5Unorm => BlockDim::block_4x4(),
+            SurfaceFormat::BC5Snorm => BlockDim::block_4x4(),
+            SurfaceFormat::BC6Sfloat => BlockDim::block_4x4(),
+            SurfaceFormat::BC6Ufloat => BlockDim::block_4x4(),
             SurfaceFormat::BC7Unorm => BlockDim::block_4x4(),
+            SurfaceFormat::BC7Srgb => BlockDim::block_4x4(),
         }
     }
 }
@@ -648,6 +700,7 @@ impl BntxFile {
             BlockHeight::ThirtyTwo => 5,
         };
 
+        // TODO: mipmaps don't work as expected.
         let data = swizzle_surface(
             width as usize,
             height as usize,
@@ -796,7 +849,8 @@ impl BntxFile {
 
 #[cfg(test)]
 mod tests {
-    use super::BntxFile;
+    use super::*;
+
     use crate::dds::create_bntx;
     use crate::dds::create_dds;
     use binrw::prelude::*;

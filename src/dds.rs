@@ -40,6 +40,7 @@ pub fn create_dds(bntx: &BntxFile) -> Result<Dds, Box<dyn Error>> {
 
 // TODO: Make this a method?
 pub fn create_bntx(name: &str, dds: &Dds) -> Result<BntxFile, Box<dyn Error>> {
+    // TODO: Use more robust code for getting the format.
     BntxFile::from_image_data(
         name,
         dds.get_width(),
@@ -57,8 +58,25 @@ pub fn create_bntx(name: &str, dds: &Dds) -> Result<BntxFile, Box<dyn Error>> {
 impl From<SurfaceFormat> for DxgiFormat {
     fn from(f: SurfaceFormat) -> Self {
         match f {
-            SurfaceFormat::R8G8B8A8Srgb => DxgiFormat::R8G8B8A8_UNorm_sRGB,
-            SurfaceFormat::BC7Unorm => DxgiFormat::BC7_UNorm,
+            SurfaceFormat::R8Unorm => Self::R8_UNorm,
+            SurfaceFormat::R8B8G8A8Unorm => Self::R8G8B8A8_UNorm,
+            SurfaceFormat::R8G8B8A8Srgb => Self::R8G8B8A8_UNorm_sRGB,
+            SurfaceFormat::B8G8R8A8Unorm => Self::B8G8R8A8_UNorm,
+            SurfaceFormat::B8G8R8A8Srgb => Self::B8G8R8A8_UNorm_sRGB,
+            SurfaceFormat::BC1Unorm => Self::BC1_UNorm,
+            SurfaceFormat::BC1Srgb => Self::BC1_UNorm_sRGB,
+            SurfaceFormat::BC2Unorm => Self::BC2_UNorm,
+            SurfaceFormat::BC2Srgb => Self::BC2_UNorm_sRGB,
+            SurfaceFormat::BC3Unorm => Self::BC3_UNorm,
+            SurfaceFormat::BC3Srgb => Self::BC3_UNorm_sRGB,
+            SurfaceFormat::BC4Unorm => Self::BC4_UNorm,
+            SurfaceFormat::BC4Snorm => Self::BC4_SNorm,
+            SurfaceFormat::BC5Unorm => Self::BC5_UNorm,
+            SurfaceFormat::BC5Snorm => Self::BC5_SNorm,
+            SurfaceFormat::BC6Sfloat => Self::BC6H_SF16,
+            SurfaceFormat::BC6Ufloat => Self::BC6H_UF16,
+            SurfaceFormat::BC7Unorm => Self::BC7_UNorm,
+            SurfaceFormat::BC7Srgb => Self::BC7_UNorm_sRGB,
         }
     }
 }
@@ -68,8 +86,25 @@ impl TryFrom<DxgiFormat> for SurfaceFormat {
 
     fn try_from(value: DxgiFormat) -> Result<Self, Self::Error> {
         match value {
-            DxgiFormat::R8G8B8A8_UNorm_sRGB => Ok(Self::R8G8B8A8Srgb),
-            DxgiFormat::BC7_UNorm => Ok(Self::BC7Unorm),
+            DxgiFormat::R8_UNorm => Ok(SurfaceFormat::R8Unorm),
+            DxgiFormat::R8G8B8A8_UNorm => Ok(SurfaceFormat::R8B8G8A8Unorm),
+            DxgiFormat::R8G8B8A8_UNorm_sRGB => Ok(SurfaceFormat::R8G8B8A8Srgb),
+            DxgiFormat::B8G8R8A8_UNorm => Ok(SurfaceFormat::B8G8R8A8Unorm),
+            DxgiFormat::B8G8R8A8_UNorm_sRGB => Ok(SurfaceFormat::B8G8R8A8Srgb),
+            DxgiFormat::BC1_UNorm => Ok(SurfaceFormat::BC1Unorm),
+            DxgiFormat::BC1_UNorm_sRGB => Ok(SurfaceFormat::BC1Srgb),
+            DxgiFormat::BC2_UNorm => Ok(SurfaceFormat::BC2Unorm),
+            DxgiFormat::BC2_UNorm_sRGB => Ok(SurfaceFormat::BC2Srgb),
+            DxgiFormat::BC3_UNorm => Ok(SurfaceFormat::BC3Unorm),
+            DxgiFormat::BC3_UNorm_sRGB => Ok(SurfaceFormat::BC3Srgb),
+            DxgiFormat::BC4_UNorm => Ok(SurfaceFormat::BC4Unorm),
+            DxgiFormat::BC4_SNorm => Ok(SurfaceFormat::BC4Snorm),
+            DxgiFormat::BC5_UNorm => Ok(SurfaceFormat::BC5Unorm),
+            DxgiFormat::BC5_SNorm => Ok(SurfaceFormat::BC5Snorm),
+            DxgiFormat::BC6H_SF16 => Ok(SurfaceFormat::BC6Sfloat),
+            DxgiFormat::BC6H_UF16 => Ok(SurfaceFormat::BC6Ufloat),
+            DxgiFormat::BC7_UNorm => Ok(SurfaceFormat::BC7Unorm),
+            DxgiFormat::BC7_UNorm_sRGB => Ok(SurfaceFormat::BC7Srgb),
             _ => Err(format!(
                 "DDS DXGI format {:?} does not have a corresponding Nutexb format.",
                 value
