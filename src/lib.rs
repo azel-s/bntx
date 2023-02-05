@@ -67,22 +67,6 @@ impl BntxFile {
         self.nx_header.info_ptr.format
     }
 
-    // TODO: Remove this functionality?
-    pub fn to_image(&self) -> image::DynamicImage {
-        let info = &self.nx_header.info_ptr;
-
-        let data = self.deswizzled_data().unwrap();
-
-        // TODO: Don't assume RGBA.
-        // TODO: Error if not RGBA?
-        let base_size = info.width as usize * info.height as usize * 4;
-
-        image::DynamicImage::ImageRgba8(
-            image::RgbaImage::from_raw(info.width, info.height, data[..base_size].to_owned())
-                .unwrap(),
-        )
-    }
-
     /// The deswizzled image data for all layers and mipmaps.
     pub fn deswizzled_data(&self) -> Result<Vec<u8>, Box<dyn Error>> {
         let info = &self.nx_header.info_ptr;
@@ -131,15 +115,6 @@ impl BntxFile {
         }
         let mipmaps_offset = writer.stream_position()?;
 
-        // TODO: Calculate padding from current position since BRTD starts at 4080?
-        let padding_size = BRTD_SECTION_START
-            - (START_OF_STR_SECTION
-                + self.header.inner.str_section.get_size()
-                + self.nx_header.dict.get_size()
-                + SIZE_OF_BRTI
-                + 0x200
-                + DATA_PTR_SIZE);
-
         let padding_size = BRTD_SECTION_START as u64 - mipmaps_offset;
         vec![0u8; padding_size as usize].write_options(writer, &options, ())?;
 
@@ -168,7 +143,6 @@ impl BntxFile {
 
         let data = img.into_raw();
 
-        // TODO: This should fail if the format isn't RGBA8 already.
         Self::from_image_data(
             name,
             width,
@@ -182,12 +156,12 @@ impl BntxFile {
     }
 
     /// Create a [BntxFile] from unswizzled image data.
-    fn from_image_data(
+    pub fn from_image_data(
         name: &str,
         width: u32,
         height: u32,
         depth: u32,
-        mips_count: u32,
+        mipmap_count: u32,
         layer_count: u32,
         format: SurfaceFormat,
         data: &[u8],
@@ -212,11 +186,11 @@ impl BntxFile {
             width as usize,
             height as usize,
             depth as usize,
-            &data,
+            data,
             block_dim,
             Some(block_height),
             bytes_per_pixel,
-            mips_count as usize,
+            mipmap_count as usize,
             layer_count as usize,
         )?;
 
@@ -230,28 +204,15 @@ impl BntxFile {
         let str_section_size = str_section.get_size();
         let dict_section_size = (DictSection {}).get_size();
 
-        // TODO: Create a function for this.
-        let mut mipmap_offsets = Vec::new();
-
-        // TODO: Use fold for this?
-        let mut mipmap_offset = 0;
-        for mip in 0..mips_count {
-            mipmap_offsets.push(START_OF_TEXTURE_DATA as u64 + mipmap_offset as u64);
-
-            let mip_width = div_round_up((width as usize >> mip).max(1), block_dim.width.get());
-            let mip_height = div_round_up((height as usize >> mip).max(1), block_dim.height.get());
-            let mip_depth = div_round_up((depth as usize >> mip).max(1), block_dim.depth.get());
-            let mip_block_height = mip_block_height(mip_height, block_height);
-            let mip_size = tegra_swizzle::swizzle::swizzled_mip_size(
-                mip_width,
-                mip_height,
-                mip_depth,
-                mip_block_height,
-                bytes_per_pixel,
-            );
-
-            mipmap_offset += mip_size;
-        }
+        let mipmap_offsets = calculate_mipmap_offsets(
+            mipmap_count,
+            width,
+            block_dim,
+            height,
+            depth,
+            block_height,
+            bytes_per_pixel,
+        );
 
         Ok(Self {
             header: BntxHeader {
@@ -343,7 +304,7 @@ impl BntxFile {
                     texture_dimension: TextureDimension::D2,
                     tile_mode: 0,
                     swizzle: 0,
-                    mipmap_count: mips_count as u16,
+                    mipmap_count: mipmap_count as u16,
                     multi_sample_count: 1,
                     format,
                     unk2: 32,
@@ -378,6 +339,38 @@ impl BntxFile {
 
         self.write(&mut file)
     }
+}
+
+fn calculate_mipmap_offsets(
+    mipmap_count: u32,
+    width: u32,
+    block_dim: BlockDim,
+    height: u32,
+    depth: u32,
+    block_height: BlockHeight,
+    bytes_per_pixel: usize,
+) -> Vec<u64> {
+    let mut mipmap_offsets = Vec::new();
+
+    let mut mipmap_offset = 0;
+    for mip in 0..mipmap_count {
+        mipmap_offsets.push(START_OF_TEXTURE_DATA as u64 + mipmap_offset as u64);
+
+        let mip_width = div_round_up((width as usize >> mip).max(1), block_dim.width.get());
+        let mip_height = div_round_up((height as usize >> mip).max(1), block_dim.height.get());
+        let mip_depth = div_round_up((depth as usize >> mip).max(1), block_dim.depth.get());
+        let mip_block_height = mip_block_height(mip_height, block_height);
+        let mip_size = tegra_swizzle::swizzle::swizzled_mip_size(
+            mip_width,
+            mip_height,
+            mip_depth,
+            mip_block_height,
+            bytes_per_pixel,
+        );
+
+        mipmap_offset += mip_size;
+    }
+    mipmap_offsets
 }
 
 #[derive(BinRead, PartialEq, Debug, Clone, Copy)]

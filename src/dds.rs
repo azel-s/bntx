@@ -107,8 +107,7 @@ impl TryFrom<DxgiFormat> for SurfaceFormat {
             DxgiFormat::BC7_UNorm => Ok(SurfaceFormat::BC7Unorm),
             DxgiFormat::BC7_UNorm_sRGB => Ok(SurfaceFormat::BC7Srgb),
             _ => Err(format!(
-                "DDS DXGI format {:?} does not have a corresponding Nutexb format.",
-                value
+                "DDS DXGI format {value:?} does not have a corresponding Nutexb format."
             )),
         }
     }
