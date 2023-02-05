@@ -4,16 +4,381 @@ use binrw::prelude::*;
 use binrw::{BinWrite, WriteOptions};
 use binrw::{FilePtr16, FilePtr32, FilePtr64, NullString};
 use std::error::Error;
+use std::io::SeekFrom;
 use std::path::Path;
 use std::{fmt, io};
 use tegra_swizzle::block_height_mip0;
 use tegra_swizzle::div_round_up;
+use tegra_swizzle::mip_block_height;
 use tegra_swizzle::surface::{deswizzle_surface, swizzle_surface, BlockDim};
 use tegra_swizzle::BlockHeight;
 
 // TODO: Add module level docs for basic usage.
 // TODO: Make this optional.
 pub mod dds;
+
+const BNTX_HEADER_SIZE: usize = 0x20;
+const NX_HEADER_SIZE: usize = 0x28;
+const HEADER_SIZE: usize = BNTX_HEADER_SIZE + NX_HEADER_SIZE;
+const MEM_POOL_SIZE: usize = 0x150;
+const DATA_PTR_SIZE: usize = 8;
+
+const START_OF_STR_SECTION: usize = HEADER_SIZE + MEM_POOL_SIZE + DATA_PTR_SIZE;
+
+const STR_HEADER_SIZE: usize = 0x14;
+const EMPTY_STR_SIZE: usize = 4;
+
+const FILENAME_STR_OFFSET: usize = START_OF_STR_SECTION + STR_HEADER_SIZE + EMPTY_STR_SIZE;
+
+const BRTD_SECTION_START: usize = 0xFF0;
+const SIZE_OF_BRTD: usize = 0x10;
+const START_OF_TEXTURE_DATA: usize = BRTD_SECTION_START + SIZE_OF_BRTD;
+
+#[derive(BinRead, Debug)]
+pub struct BntxFile {
+    header: BntxHeader,
+
+    #[br(is_little = header.bom == ByteOrder::LittleEndian)]
+    nx_header: NxHeader,
+}
+
+impl BntxFile {
+    pub fn width(&self) -> u32 {
+        self.nx_header.info_ptr.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.nx_header.info_ptr.height
+    }
+
+    pub fn depth(&self) -> u32 {
+        self.nx_header.info_ptr.depth
+    }
+
+    pub fn num_array_layers(&self) -> u32 {
+        self.nx_header.info_ptr.layer_count
+    }
+
+    pub fn num_mipmaps(&self) -> u32 {
+        self.nx_header.info_ptr.mipmap_count as u32
+    }
+
+    pub fn image_format(&self) -> SurfaceFormat {
+        self.nx_header.info_ptr.format
+    }
+
+    // TODO: Remove this functionality?
+    pub fn to_image(&self) -> image::DynamicImage {
+        let info = &self.nx_header.info_ptr;
+
+        let data = self.deswizzled_data().unwrap();
+
+        // TODO: Don't assume RGBA.
+        // TODO: Error if not RGBA?
+        let base_size = info.width as usize * info.height as usize * 4;
+
+        image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(info.width, info.height, data[..base_size].to_owned())
+                .unwrap(),
+        )
+    }
+
+    /// The deswizzled image data for all layers and mipmaps.
+    pub fn deswizzled_data(&self) -> Result<Vec<u8>, Box<dyn Error>> {
+        let info = &self.nx_header.info_ptr;
+
+        deswizzle_surface(
+            info.width as usize,
+            info.height as usize,
+            info.depth as usize,
+            &info.texture.image_data,
+            info.format.block_dim(),
+            Some(BlockHeight::new(2u32.pow(info.block_height_log2) as usize).unwrap()),
+            info.format.bytes_per_pixel(),
+            info.mipmap_count as usize,
+            info.layer_count as usize,
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn write<W: io::Write + io::Seek>(
+        &self,
+        writer: &mut W,
+    ) -> Result<(), binrw::error::Error> {
+        let options = binrw::WriteOptions::new(binrw::Endian::Little);
+        self.header.write_options(writer, &options, self)?;
+        self.nx_header.write_options(writer, &options, self)?;
+
+        (
+            // memory pool
+            &[0u8; 0x150][..],
+            (START_OF_STR_SECTION
+                + self.header.inner.str_section.get_size()
+                + self.nx_header.dict.get_size()) as u64,
+            &self.header.inner.str_section,
+            &self.nx_header.dict,
+        )
+            .write_options(writer, &options, ())?;
+
+        self.nx_header
+            .info_ptr
+            .write_options(writer, &options, self)?;
+
+        vec![0u8; 512].write_options(writer, &options, ())?;
+
+        for offset in &self.nx_header.info_ptr.texture.mipmap_offsets {
+            offset.write_options(writer, &options, ())?;
+        }
+        let mipmaps_offset = writer.stream_position()?;
+
+        // TODO: Calculate padding from current position since BRTD starts at 4080?
+        let padding_size = BRTD_SECTION_START
+            - (START_OF_STR_SECTION
+                + self.header.inner.str_section.get_size()
+                + self.nx_header.dict.get_size()
+                + SIZE_OF_BRTI
+                + 0x200
+                + DATA_PTR_SIZE);
+
+        let padding_size = BRTD_SECTION_START as u64 - mipmaps_offset;
+        vec![0u8; padding_size as usize].write_options(writer, &options, ())?;
+
+        // BRTD
+        (
+            b"BRTD",
+            0,
+            self.nx_header.info_ptr.texture.image_data.len() as u64 + 0x10,
+        )
+            .write_options(writer, &options, ())?;
+
+        writer.write_all(&self.nx_header.info_ptr.texture.image_data)?;
+
+        self.header
+            .inner
+            .reloc_table
+            .write_options(writer, &options, self)?;
+
+        Ok(())
+    }
+
+    pub fn from_image(img: image::DynamicImage, name: &str) -> Result<Self, Box<dyn Error>> {
+        let img = img.to_rgba8();
+
+        let (width, height) = img.dimensions();
+
+        let data = img.into_raw();
+
+        // TODO: This should fail if the format isn't RGBA8 already.
+        Self::from_image_data(
+            name,
+            width,
+            height,
+            1,
+            1,
+            1,
+            SurfaceFormat::R8G8B8A8Srgb,
+            &data,
+        )
+    }
+
+    /// Create a [BntxFile] from unswizzled image data.
+    fn from_image_data(
+        name: &str,
+        width: u32,
+        height: u32,
+        depth: u32,
+        mips_count: u32,
+        layer_count: u32,
+        format: SurfaceFormat,
+        data: &[u8],
+    ) -> Result<Self, Box<dyn Error>> {
+        // Let tegra_swizzle calculate the block height.
+        // This matches the value inferred for missing block heights like in nutexb.
+        let block_dim = format.block_dim();
+        let block_height = block_height_mip0(div_round_up(height as usize, block_dim.height.get()));
+
+        let block_height_log2 = match block_height {
+            BlockHeight::One => 0,
+            BlockHeight::Two => 1,
+            BlockHeight::Four => 2,
+            BlockHeight::Eight => 3,
+            BlockHeight::Sixteen => 4,
+            BlockHeight::ThirtyTwo => 5,
+        };
+
+        let bytes_per_pixel = format.bytes_per_pixel();
+
+        let data = swizzle_surface(
+            width as usize,
+            height as usize,
+            depth as usize,
+            &data,
+            block_dim,
+            Some(block_height),
+            bytes_per_pixel,
+            mips_count as usize,
+            layer_count as usize,
+        )?;
+
+        let str_section = StrSection {
+            unk: 0x58,
+            unk2: 0x58,
+            unk3: 0,
+            strings: vec![BntxStr::from(name.to_owned())],
+        };
+
+        let str_section_size = str_section.get_size();
+        let dict_section_size = (DictSection {}).get_size();
+
+        // TODO: Create a function for this.
+        let mut mipmap_offsets = Vec::new();
+
+        // TODO: Use fold for this?
+        let mut mipmap_offset = 0;
+        for mip in 0..mips_count {
+            mipmap_offsets.push(START_OF_TEXTURE_DATA as u64 + mipmap_offset as u64);
+
+            let mip_width = div_round_up((width as usize >> mip).max(1), block_dim.width.get());
+            let mip_height = div_round_up((height as usize >> mip).max(1), block_dim.height.get());
+            let mip_depth = div_round_up((depth as usize >> mip).max(1), block_dim.depth.get());
+            let mip_block_height = mip_block_height(mip_height, block_height);
+            let mip_size = tegra_swizzle::swizzle::swizzled_mip_size(
+                mip_width,
+                mip_height,
+                mip_depth,
+                mip_block_height,
+                bytes_per_pixel,
+            );
+
+            mipmap_offset += mip_size;
+        }
+
+        Ok(Self {
+            header: BntxHeader {
+                version: (0, 4),
+                bom: ByteOrder::LittleEndian,
+                inner: HeaderInner {
+                    revision: 0x400c,
+                    file_name: name.into(),
+                    str_section,
+                    reloc_table: RelocationTable {
+                        sections: vec![
+                            RelocationSection {
+                                pointer: 0,
+                                position: 0,
+                                size: (START_OF_STR_SECTION
+                                    + str_section_size
+                                    + dict_section_size
+                                    + SIZE_OF_BRTI
+                                    + 0x208) as u32,
+                                index: 0,
+                                count: 4,
+                            },
+                            RelocationSection {
+                                pointer: 0,
+                                position: BRTD_SECTION_START as u32,
+                                size: (data.len() + SIZE_OF_BRTD) as u32,
+                                index: 4,
+                                count: 1,
+                            },
+                        ],
+                        entries: vec![
+                            RelocationEntry {
+                                position: BNTX_HEADER_SIZE as u32 + 8,
+                                struct_count: 2,
+                                offset_count: 1,
+                                padding_count: (((HEADER_SIZE + MEM_POOL_SIZE)
+                                    - (BNTX_HEADER_SIZE + 0x10))
+                                    / 8) as u8,
+                            },
+                            RelocationEntry {
+                                position: BNTX_HEADER_SIZE as u32 + 0x18,
+                                struct_count: 2,
+                                offset_count: 2,
+                                padding_count: ((START_OF_STR_SECTION
+                                    + str_section_size
+                                    + dict_section_size
+                                    + 0x80
+                                    - HEADER_SIZE)
+                                    / 8) as u8,
+                            },
+                            RelocationEntry {
+                                position: (START_OF_STR_SECTION + str_section_size + 0x10) as u32,
+                                struct_count: 2,
+                                offset_count: 1,
+                                padding_count: 1,
+                            },
+                            RelocationEntry {
+                                position: (START_OF_STR_SECTION
+                                    + str_section_size
+                                    + dict_section_size
+                                    + 0x60) as u32,
+                                struct_count: 1,
+                                offset_count: 3,
+                                padding_count: 0,
+                            },
+                            RelocationEntry {
+                                position: (BNTX_HEADER_SIZE + 0x10) as u32,
+                                struct_count: 2,
+                                offset_count: 1,
+                                padding_count: (((START_OF_STR_SECTION
+                                    + str_section_size
+                                    + dict_section_size
+                                    + SIZE_OF_BRTI
+                                    + 0x200)
+                                    - (BNTX_HEADER_SIZE + 0x18))
+                                    / 8) as u8,
+                            },
+                        ],
+                    },
+                },
+            },
+            nx_header: NxHeader {
+                dict: DictSection {},
+                dict_size: 0x58,
+                info_ptr: BrtiSection {
+                    size: 3576,
+                    size2: 3576,
+                    flags: 1,
+                    texture_dimension: TextureDimension::D2,
+                    tile_mode: 0,
+                    swizzle: 0,
+                    mipmap_count: mips_count as u16,
+                    multi_sample_count: 1,
+                    format,
+                    unk2: 32,
+                    width,
+                    height,
+                    depth,
+                    layer_count,
+                    block_height_log2,
+                    unk4: [65543, 0, 0, 0, 0, 0],
+                    image_size: data.len() as _,
+                    align: 512,
+                    comp_sel: 84148994,
+                    texture_view_dimension: TextureViewDimension::D2,
+                    name_addr: name.to_owned().into(),
+                    parent_addr: 32,
+                    texture: Texture {
+                        mipmap_offsets,
+                        image_data: data,
+                    },
+                },
+            },
+        })
+    }
+
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, binrw::error::Error> {
+        let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+        reader.read_le()
+    }
+
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), binrw::error::Error> {
+        let mut file = std::fs::File::create(path.as_ref())?;
+
+        self.write(&mut file)
+    }
+}
 
 #[derive(BinRead, PartialEq, Debug, Clone, Copy)]
 enum ByteOrder {
@@ -36,23 +401,6 @@ struct BntxHeader {
     inner: HeaderInner,
 }
 
-const BNTX_HEADER_SIZE: usize = 0x20;
-const NX_HEADER_SIZE: usize = 0x28;
-const HEADER_SIZE: usize = BNTX_HEADER_SIZE + NX_HEADER_SIZE;
-const MEM_POOL_SIZE: usize = 0x150;
-const DATA_PTR_SIZE: usize = 8;
-
-const START_OF_STR_SECTION: usize = HEADER_SIZE + MEM_POOL_SIZE + DATA_PTR_SIZE;
-
-const STR_HEADER_SIZE: usize = 0x14;
-const EMPTY_STR_SIZE: usize = 4;
-
-const FILENAME_STR_OFFSET: usize = START_OF_STR_SECTION + STR_HEADER_SIZE + EMPTY_STR_SIZE;
-
-const BRTD_SECTION_START: usize = 0xFF0;
-const SIZE_OF_BRTD: usize = 0x10;
-const START_OF_TEXTURE_DATA: usize = BRTD_SECTION_START + SIZE_OF_BRTD;
-
 impl BntxHeader {
     fn write_options<W: io::Write + io::Seek>(
         &self,
@@ -61,7 +409,7 @@ impl BntxHeader {
         parent: &BntxFile,
     ) -> Result<(), binrw::error::Error> {
         let start_of_reloc_section =
-            (START_OF_TEXTURE_DATA + parent.nx_header.info_ptr.texture.0.len()) as u32;
+            (START_OF_TEXTURE_DATA + parent.nx_header.info_ptr.texture.image_data.len()) as u32;
         (
             b"BNTX",
             0u32,
@@ -157,7 +505,7 @@ impl RelocationTable {
     ) -> Result<(), binrw::error::Error> {
         (
             b"_RLT",
-            (START_OF_TEXTURE_DATA + parent.nx_header.info_ptr.texture.0.len()) as u32,
+            (START_OF_TEXTURE_DATA + parent.nx_header.info_ptr.texture.image_data.len()) as u32,
             self.sections.len() as u32,
             0u32,
             &self.sections,
@@ -171,8 +519,8 @@ impl RelocationTable {
 #[derive(Debug)]
 #[br(magic = b"_STR")]
 struct StrSection {
-    unk: u32,
-    unk2: u32,
+    unk: u32,  // block offset
+    unk2: u32, // block size u64?
     unk3: u32,
 
     #[br(temp)]
@@ -416,14 +764,14 @@ impl SurfaceFormat {
 #[derive(BinRead, Debug)]
 #[br(magic = b"BRTI")]
 struct BrtiSection {
-    size: u32,
-    size2: u64,
+    size: u32,  // offset?
+    size2: u64, // size?
     flags: u8,
-    dim: u8,
+    texture_dimension: TextureDimension,
     tile_mode: u16,
     swizzle: u16,
-    mips_count: u16,
-    num_multi_sample: u32,
+    mipmap_count: u16,
+    multi_sample_count: u32,
     format: SurfaceFormat,
     unk2: u32,
     width: u32,
@@ -431,18 +779,41 @@ struct BrtiSection {
     depth: u32,
     layer_count: u32,
     block_height_log2: u32,
-    unk4: [u32; 6],
-    image_size: u32,
-    align: u32,
+    unk4: [u32; 6],  // TODO: What is this?
+    image_size: u32, // the total size of all layers and mipmaps with padding
+    align: u32,      // usually 512 to match the expected mipmap alignment for swizzled surfaces.
     comp_sel: u32,
-    ty: u32,
+    texture_view_dimension: TextureViewDimension,
 
     #[br(parse_with = FilePtr64::parse)]
-    name_addr: BntxStr,
-    parent_addr: u64,
+    name_addr: BntxStr, // u64 pointer to name
+    parent_addr: u64, // pointer to nx header
 
-    #[br(args(image_size), parse_with = read_double_indirect)]
-    texture: ImageData,
+    // TODO: This is a pointer to an array of u64 mipmap offsets.
+    // TODO: Parse the entire surface in one vec but store the mipmap offsets?
+    #[br(args(image_size, mipmap_count), parse_with = FilePtr64::parse)]
+    texture: Texture,
+    // TODO: Additional fields?
+}
+
+#[binrw]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[brw(repr(u8))]
+pub enum TextureDimension {
+    D1 = 1,
+    D2 = 2,
+    D3 = 3,
+}
+
+#[binrw]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[brw(repr(u32))]
+pub enum TextureViewDimension {
+    D1 = 0,
+    D2 = 1,
+    D3 = 2,
+    Cube = 3,
+    // TODO: Fill in other known variants
 }
 
 const SIZE_OF_BRTI: usize = 0xA0;
@@ -460,11 +831,11 @@ impl BrtiSection {
                 self.size,
                 self.size2,
                 self.flags,
-                self.dim,
+                self.texture_dimension,
                 self.tile_mode,
                 self.swizzle,
-                self.mips_count,
-                self.num_multi_sample,
+                self.mipmap_count,
+                self.multi_sample_count,
                 &self.format,
                 self.unk2,
                 self.width,
@@ -477,7 +848,7 @@ impl BrtiSection {
                 self.align,
                 self.comp_sel,
             ),
-            self.ty,
+            self.texture_view_dimension,
             FILENAME_STR_OFFSET as u64,
             BNTX_HEADER_SIZE as u64,
             (START_OF_STR_SECTION
@@ -523,327 +894,20 @@ where
 }
 
 #[derive(BinRead)]
-#[br(import(len: u32))]
-struct ImageData(#[br(count = len)] pub Vec<u8>);
+#[br(import(image_size: u32, mipmap_count: u16))]
+struct Texture {
+    #[br(count = mipmap_count)]
+    mipmap_offsets: Vec<u64>,
 
-impl fmt::Debug for ImageData {
+    // TODO: Handle the case where the mipmaps are empty.
+    // TODO: Just write a custom parse function?
+    #[br(count = image_size, seek_before = SeekFrom::Start(mipmap_offsets[0]))]
+    image_data: Vec<u8>,
+}
+
+impl fmt::Debug for Texture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ImageData[{}]", self.0.len())
-    }
-}
-
-#[derive(BinRead, Debug)]
-pub struct BntxFile {
-    header: BntxHeader,
-
-    #[br(is_little = header.bom == ByteOrder::LittleEndian)]
-    nx_header: NxHeader,
-}
-
-// TODO: Add DDS support similar to nutexb.
-impl BntxFile {
-    pub fn width(&self) -> u32 {
-        self.nx_header.info_ptr.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.nx_header.info_ptr.height
-    }
-
-    pub fn depth(&self) -> u32 {
-        self.nx_header.info_ptr.depth
-    }
-
-    pub fn num_array_layers(&self) -> u32 {
-        self.nx_header.info_ptr.layer_count
-    }
-
-    pub fn num_mipmaps(&self) -> u32 {
-        self.nx_header.info_ptr.mips_count as u32
-    }
-
-    pub fn image_format(&self) -> SurfaceFormat {
-        self.nx_header.info_ptr.format
-    }
-
-    // TODO: Remove this functionality?
-    pub fn to_image(&self) -> image::DynamicImage {
-        let info = &self.nx_header.info_ptr;
-
-        let data = self.deswizzled_data().unwrap();
-
-        // TODO: Don't assume RGBA.
-        // TODO: Error if not RGBA?
-        let base_size = info.width as usize * info.height as usize * 4;
-
-        image::DynamicImage::ImageRgba8(
-            image::RgbaImage::from_raw(info.width, info.height, data[..base_size].to_owned())
-                .unwrap(),
-        )
-    }
-
-    /// The deswizzled image data for all layers and mipmaps.
-    pub fn deswizzled_data(&self) -> Result<Vec<u8>, Box<dyn Error>> {
-        let info = &self.nx_header.info_ptr;
-
-        deswizzle_surface(
-            info.width as usize,
-            info.height as usize,
-            info.depth as usize,
-            &info.texture.0,
-            info.format.block_dim(),
-            Some(BlockHeight::new(2u32.pow(info.block_height_log2) as usize).unwrap()),
-            info.format.bytes_per_pixel(),
-            info.mips_count as usize,
-            info.layer_count as usize,
-        )
-        .map_err(Into::into)
-    }
-
-    pub fn write<W: io::Write + io::Seek>(
-        &self,
-        writer: &mut W,
-    ) -> Result<(), binrw::error::Error> {
-        let options = binrw::WriteOptions::new(binrw::Endian::Little);
-        self.header.write_options(writer, &options, self)?;
-        self.nx_header.write_options(writer, &options, self)?;
-
-        (
-            // memory pool
-            &[0u8; 0x150][..],
-            (START_OF_STR_SECTION
-                + self.header.inner.str_section.get_size()
-                + self.nx_header.dict.get_size()) as u64,
-            &self.header.inner.str_section,
-            &self.nx_header.dict,
-        )
-            .write_options(writer, &options, ())?;
-
-        self.nx_header
-            .info_ptr
-            .write_options(writer, &options, self)?;
-
-        vec![0u8; 512].write_options(writer, &options, ())?;
-
-        0x1000u64.write_options(writer, &options, ())?;
-
-        let padding_size = BRTD_SECTION_START
-            - (START_OF_STR_SECTION
-                + self.header.inner.str_section.get_size()
-                + self.nx_header.dict.get_size()
-                + SIZE_OF_BRTI
-                + 0x200
-                + DATA_PTR_SIZE);
-
-        vec![0u8; padding_size].write_options(writer, &options, ())?;
-
-        // BRTD
-        (
-            b"BRTD",
-            0,
-            self.nx_header.info_ptr.texture.0.len() as u64 + 0x10,
-        )
-            .write_options(writer, &options, ())?;
-
-        writer.write_all(&self.nx_header.info_ptr.texture.0)?;
-
-        self.header
-            .inner
-            .reloc_table
-            .write_options(writer, &options, self)?;
-
-        Ok(())
-    }
-
-    pub fn from_image(img: image::DynamicImage, name: &str) -> Result<Self, Box<dyn Error>> {
-        let img = img.to_rgba8();
-
-        let (width, height) = img.dimensions();
-
-        let data = img.into_raw();
-
-        // TODO: This should fail if the format isn't RGBA8 already.
-        Self::from_image_data(
-            name,
-            width,
-            height,
-            1,
-            1,
-            1,
-            SurfaceFormat::R8G8B8A8Srgb,
-            &data,
-        )
-    }
-
-    /// Create a [BntxFile] from unswizzled image data.
-    fn from_image_data(
-        name: &str,
-        width: u32,
-        height: u32,
-        depth: u32,
-        mips_count: u32,
-        layer_count: u32,
-        format: SurfaceFormat,
-        data: &[u8],
-    ) -> Result<Self, Box<dyn Error>> {
-        // Let tegra_swizzle calculate the block height.
-        // This matches the value inferred for missing block heights like in nutexb.
-        let block_dim = format.block_dim();
-        let block_height = block_height_mip0(div_round_up(height as usize, block_dim.height.get()));
-
-        let block_height_log2 = match block_height {
-            BlockHeight::One => 0,
-            BlockHeight::Two => 1,
-            BlockHeight::Four => 2,
-            BlockHeight::Eight => 3,
-            BlockHeight::Sixteen => 4,
-            BlockHeight::ThirtyTwo => 5,
-        };
-
-        // TODO: mipmaps don't work as expected.
-        let data = swizzle_surface(
-            width as usize,
-            height as usize,
-            depth as usize,
-            &data,
-            block_dim,
-            Some(block_height),
-            format.bytes_per_pixel(),
-            mips_count as usize,
-            layer_count as usize,
-        )?;
-
-        let str_section = StrSection {
-            unk: 0x48,
-            unk2: 0x48,
-            unk3: 0,
-            strings: vec![BntxStr::from(name.to_owned())],
-        };
-
-        let str_section_size = str_section.get_size();
-        let dict_section_size = (DictSection {}).get_size();
-
-        Ok(Self {
-            header: BntxHeader {
-                version: (0, 4),
-                bom: ByteOrder::LittleEndian,
-                inner: HeaderInner {
-                    revision: 0x400c,
-                    file_name: name.into(),
-                    str_section,
-                    reloc_table: RelocationTable {
-                        sections: vec![
-                            RelocationSection {
-                                pointer: 0,
-                                position: 0,
-                                size: (START_OF_STR_SECTION
-                                    + str_section_size
-                                    + dict_section_size
-                                    + SIZE_OF_BRTI
-                                    + 0x208) as u32,
-                                index: 0,
-                                count: 4,
-                            },
-                            RelocationSection {
-                                pointer: 0,
-                                position: BRTD_SECTION_START as u32,
-                                size: (data.len() + SIZE_OF_BRTD) as u32,
-                                index: 4,
-                                count: 1,
-                            },
-                        ],
-                        entries: vec![
-                            RelocationEntry {
-                                position: BNTX_HEADER_SIZE as u32 + 8,
-                                struct_count: 2,
-                                offset_count: 1,
-                                padding_count: (((HEADER_SIZE + MEM_POOL_SIZE)
-                                    - (BNTX_HEADER_SIZE + 0x10))
-                                    / 8) as u8,
-                            },
-                            RelocationEntry {
-                                position: BNTX_HEADER_SIZE as u32 + 0x18,
-                                struct_count: 2,
-                                offset_count: 2,
-                                padding_count: ((START_OF_STR_SECTION
-                                    + str_section_size
-                                    + dict_section_size
-                                    + 0x80
-                                    - HEADER_SIZE)
-                                    / 8) as u8,
-                            },
-                            RelocationEntry {
-                                position: (START_OF_STR_SECTION + str_section_size + 0x10) as u32,
-                                struct_count: 2,
-                                offset_count: 1,
-                                padding_count: 1,
-                            },
-                            RelocationEntry {
-                                position: (START_OF_STR_SECTION
-                                    + str_section_size
-                                    + dict_section_size
-                                    + 0x60) as u32,
-                                struct_count: 1,
-                                offset_count: 3,
-                                padding_count: 0,
-                            },
-                            RelocationEntry {
-                                position: (BNTX_HEADER_SIZE + 0x10) as u32,
-                                struct_count: 2,
-                                offset_count: 1,
-                                padding_count: (((START_OF_STR_SECTION
-                                    + str_section_size
-                                    + dict_section_size
-                                    + SIZE_OF_BRTI
-                                    + 0x200)
-                                    - (BNTX_HEADER_SIZE + 0x18))
-                                    / 8) as u8,
-                            },
-                        ],
-                    },
-                },
-            },
-            nx_header: NxHeader {
-                dict: DictSection {},
-                dict_size: 0x58,
-                info_ptr: BrtiSection {
-                    size: 3592,
-                    size2: 3592,
-                    flags: 1,
-                    dim: 2,
-                    tile_mode: 0,
-                    swizzle: 0,
-                    mips_count: mips_count as u16,
-                    num_multi_sample: 1,
-                    format,
-                    unk2: 32,
-                    width,
-                    height,
-                    depth,
-                    layer_count,
-                    block_height_log2,
-                    unk4: [65543, 0, 0, 0, 0, 0],
-                    image_size: data.len() as _,
-                    align: 512,
-                    comp_sel: 84148994,
-                    ty: 1,
-                    name_addr: name.to_owned().into(),
-                    parent_addr: 32,
-                    texture: ImageData(data),
-                },
-            },
-        })
-    }
-
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, binrw::error::Error> {
-        let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
-        reader.read_le()
-    }
-
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), binrw::error::Error> {
-        let mut file = std::fs::File::create(path.as_ref())?;
-
-        self.write(&mut file)
+        write!(f, "ImageData[{:?}]", self.mipmap_offsets)
     }
 }
 
@@ -853,7 +917,6 @@ mod tests {
 
     use crate::dds::create_bntx;
     use crate::dds::create_dds;
-    use binrw::prelude::*;
     use std::io::BufReader;
     use std::io::BufWriter;
 
@@ -870,7 +933,7 @@ mod tests {
         dds.write(&mut writer).unwrap();
 
         let mut writer = BufWriter::new(std::fs::File::create("spirits_0_abra.dds.bntx").unwrap());
-        create_bntx("spirts_0_abra", &dds)
+        create_bntx("spirits_0_abra", &dds)
             .unwrap()
             .write(&mut writer)
             .unwrap();

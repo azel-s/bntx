@@ -15,7 +15,7 @@ pub fn create_dds(bntx: &BntxFile) -> Result<Dds, Box<dyn Error>> {
         width: bntx.nx_header.info_ptr.width,
         depth: some_if_above_one(bntx.nx_header.info_ptr.depth),
         format: bntx.nx_header.info_ptr.format.into(),
-        mipmap_levels: some_if_above_one(bntx.nx_header.info_ptr.mips_count as u32),
+        mipmap_levels: some_if_above_one(bntx.nx_header.info_ptr.mipmap_count as u32),
         array_layers: some_if_above_one(bntx.nx_header.info_ptr.layer_count),
         caps2: if bntx.nx_header.info_ptr.depth > 1 {
             Some(Caps2::VOLUME)
@@ -23,6 +23,7 @@ pub fn create_dds(bntx: &BntxFile) -> Result<Dds, Box<dyn Error>> {
             None
         },
         is_cubemap: bntx.nx_header.info_ptr.layer_count == 6,
+        // TODO: Check the dimension instead?
         resource_dimension: if bntx.nx_header.info_ptr.depth > 1 {
             D3D10ResourceDimension::Texture3D
         } else {
