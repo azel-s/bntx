@@ -3,7 +3,6 @@ use binrw::binrw;
 use binrw::prelude::*;
 use binrw::{BinWrite, WriteOptions};
 use binrw::{FilePtr16, FilePtr32, FilePtr64, NullString};
-use std::error::Error;
 use std::io::SeekFrom;
 use std::path::Path;
 use std::{fmt, io};
@@ -68,7 +67,7 @@ impl BntxFile {
     }
 
     /// The deswizzled image data for all layers and mipmaps.
-    pub fn deswizzled_data(&self) -> Result<Vec<u8>, Box<dyn Error>> {
+    pub fn deswizzled_data(&self) -> Result<Vec<u8>, tegra_swizzle::SwizzleError> {
         let info = &self.nx_header.info_ptr;
 
         deswizzle_surface(
@@ -82,7 +81,6 @@ impl BntxFile {
             info.mipmap_count as usize,
             info.layer_count as usize,
         )
-        .map_err(Into::into)
     }
 
     pub fn write<W: io::Write + io::Seek>(
@@ -136,17 +134,16 @@ impl BntxFile {
         Ok(())
     }
 
-    pub fn from_image(img: image::DynamicImage, name: &str) -> Result<Self, Box<dyn Error>> {
-        let img = img.to_rgba8();
-
-        let (width, height) = img.dimensions();
-
-        let data = img.into_raw();
+    pub fn from_image(
+        img: image::DynamicImage,
+        name: &str,
+    ) -> Result<Self, tegra_swizzle::SwizzleError> {
+        let data = img.to_rgba8().into_raw();
 
         Self::from_image_data(
             name,
-            width,
-            height,
+            img.width(),
+            img.height(),
             1,
             1,
             1,
@@ -165,7 +162,7 @@ impl BntxFile {
         layer_count: u32,
         format: SurfaceFormat,
         data: &[u8],
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, tegra_swizzle::SwizzleError> {
         // Let tegra_swizzle calculate the block height.
         // This matches the value inferred for missing block heights like in nutexb.
         let block_dim = format.block_dim();
@@ -683,7 +680,7 @@ impl BinWrite for DictSection {
 #[brw(repr(u32))]
 pub enum SurfaceFormat {
     R8Unorm = 0x0201,
-    R8B8G8A8Unorm = 0x0b01,
+    R8G8B8A8Unorm = 0x0b01,
     R8G8B8A8Srgb = 0x0b06,
     B8G8R8A8Unorm = 0x0c01,
     B8G8R8A8Srgb = 0x0c06,
@@ -708,7 +705,7 @@ impl SurfaceFormat {
     fn bytes_per_pixel(&self) -> usize {
         match self {
             SurfaceFormat::R8Unorm => 1,
-            SurfaceFormat::R8B8G8A8Unorm => 4,
+            SurfaceFormat::R8G8B8A8Unorm => 4,
             SurfaceFormat::R8G8B8A8Srgb => 4,
             SurfaceFormat::B8G8R8A8Unorm => 4,
             SurfaceFormat::B8G8R8A8Srgb => 4,
@@ -732,7 +729,7 @@ impl SurfaceFormat {
     fn block_dim(&self) -> BlockDim {
         match self {
             SurfaceFormat::R8Unorm => BlockDim::uncompressed(),
-            SurfaceFormat::R8B8G8A8Unorm => BlockDim::uncompressed(),
+            SurfaceFormat::R8G8B8A8Unorm => BlockDim::uncompressed(),
             SurfaceFormat::R8G8B8A8Srgb => BlockDim::uncompressed(),
             SurfaceFormat::B8G8R8A8Unorm => BlockDim::uncompressed(),
             SurfaceFormat::B8G8R8A8Srgb => BlockDim::uncompressed(),
