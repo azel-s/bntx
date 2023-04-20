@@ -511,93 +511,53 @@ impl RelocationTable {
     }
 }
 
-#[binread]
+#[binrw]
 #[derive(Debug)]
-#[br(magic = b"_STR")]
+#[brw(magic = b"_STR")]
 struct StrSection {
     block_size: u32,
     block_offset: u64,
 
     #[br(temp)]
+    #[bw(calc = strings.len() as u32)]
     str_count: u32,
 
     #[br(temp)]
+    #[bw(calc = BntxStr::from(String::new()))]
     empty: BntxStr,
 
     #[br(count = str_count)]
+    #[bw(align_after = 8)]
     strings: Vec<BntxStr>,
-}
-
-const fn round_up(x: u64, n: u64) -> u64 {
-    ((x + n - 1) / n) * n
-}
-
-impl BinWrite for StrSection {
-    type Args = ();
-
-    fn write_options<W: io::Write + io::Seek>(
-        &self,
-        writer: &mut W,
-        options: &WriteOptions,
-        _args: Self::Args,
-    ) -> Result<(), binrw::error::Error> {
-        (
-            b"_STR",
-            self.block_size,
-            self.block_offset,
-            self.strings.len() as u32,
-            BntxStr::from(String::new()),
-            &self.strings,
-        )
-            .write_options(writer, options, ())?;
-        // The string section size is aligned to 8 bytes.
-        // TODO: Find a cleaner way to do this.
-        let pos = writer.stream_position()?;
-        writer.seek(SeekFrom::Start(round_up(pos, 8)))?;
-        Ok(())
-    }
 }
 
 impl StrSection {
     fn get_size(&self) -> usize {
-        let size = (5 * size_of::<u32>())
-            + EMPTY_STR_SIZE
-            + self.strings.iter().map(|x| x.get_size()).sum::<usize>();
-
-        round_up(size as u64, 8) as usize
+        align(
+            (5 * size_of::<u32>())
+                + EMPTY_STR_SIZE
+                + self.strings.iter().map(|x| x.get_size()).sum::<usize>(),
+            8,
+        )
     }
 }
 
-#[binread]
+#[binrw]
 #[derive(Debug)]
 struct BntxStr {
+    #[br(temp)]
+    #[bw(calc = chars.len() as u16)]
     len: u16,
 
     #[br(align_after = 4, count = len, map = |x: Vec<u8>| String::from_utf8_lossy(&x).into_owned())]
+    #[bw(align_after = 4, map = |s| bytes_null_terminated(s))]
     chars: String,
 }
 
-// TODO: Find a way to derive this implementation.
-impl BinWrite for BntxStr {
-    type Args = ();
-
-    fn write_options<W: io::Write + io::Seek>(
-        &self,
-        writer: &mut W,
-        options: &WriteOptions,
-        args: Self::Args,
-    ) -> Result<(), binrw::error::Error> {
-        self.len.write_options(writer, options, ())?;
-        self.chars.as_bytes().write_options(writer, options, ())?;
-        0u8.write_options(writer, options, ())?;
-        // Align to 4 bytes.
-        let pos = writer.stream_position()?;
-        let new_pos = align(pos as usize, 4);
-        for _ in 0..(new_pos - pos as usize) {
-            0u8.write_options(writer, options, ())?;
-        }
-        Ok(())
-    }
+fn bytes_null_terminated(s: &str) -> Vec<u8> {
+    let mut bytes = s.as_bytes().to_vec();
+    bytes.push(0u8);
+    bytes
 }
 
 fn align(x: usize, n: usize) -> usize {
@@ -612,10 +572,7 @@ impl BntxStr {
 
 impl From<String> for BntxStr {
     fn from(chars: String) -> Self {
-        BntxStr {
-            len: chars.len() as u16,
-            chars,
-        }
+        BntxStr { chars }
     }
 }
 
