@@ -192,14 +192,17 @@ impl BntxFile {
         )?;
 
         let str_section = StrSection {
-            unk: 0x58,
-            unk2: 0x58,
-            unk3: 0,
+            block_size: 0x58,
+            block_offset: 0x58,
             strings: vec![BntxStr::from(name.to_owned())],
         };
 
         let str_section_size = str_section.get_size();
-        let dict_section_size = (DictSection {}).get_size();
+        let dict_section_size = (DictSection {
+            node_count: 0,
+            nodes: vec![],
+        })
+        .get_size();
 
         let mipmap_offsets = calculate_mipmap_offsets(
             mipmap_count,
@@ -292,7 +295,10 @@ impl BntxFile {
                 },
             },
             nx_header: NxHeader {
-                dict: DictSection {},
+                dict: DictSection {
+                    node_count: 0,
+                    nodes: vec![],
+                },
                 dict_size: 0x58,
                 info_ptr: BrtiSection {
                     size: 3576,
@@ -509,9 +515,8 @@ impl RelocationTable {
 #[derive(Debug)]
 #[br(magic = b"_STR")]
 struct StrSection {
-    unk: u32,  // block offset
-    unk2: u32, // block size u64?
-    unk3: u32,
+    block_size: u32,
+    block_offset: u64,
 
     #[br(temp)]
     str_count: u32,
@@ -523,6 +528,10 @@ struct StrSection {
     strings: Vec<BntxStr>,
 }
 
+const fn round_up(x: u64, n: u64) -> u64 {
+    ((x + n - 1) / n) * n
+}
+
 impl BinWrite for StrSection {
     type Args = ();
 
@@ -530,26 +539,32 @@ impl BinWrite for StrSection {
         &self,
         writer: &mut W,
         options: &WriteOptions,
-        args: Self::Args,
+        _args: Self::Args,
     ) -> Result<(), binrw::error::Error> {
         (
             b"_STR",
-            self.unk,
-            self.unk2,
-            self.unk3,
+            self.block_size,
+            self.block_offset,
             self.strings.len() as u32,
             BntxStr::from(String::new()),
             &self.strings,
         )
-            .write_options(writer, options, ())
+            .write_options(writer, options, ())?;
+        // The string section size is aligned to 8 bytes.
+        // TODO: Find a cleaner way to do this.
+        let pos = writer.stream_position()?;
+        writer.seek(SeekFrom::Start(round_up(pos, 8)))?;
+        Ok(())
     }
 }
 
 impl StrSection {
     fn get_size(&self) -> usize {
-        (5 * size_of::<u32>())
+        let size = (5 * size_of::<u32>())
             + EMPTY_STR_SIZE
-            + self.strings.iter().map(|x| x.get_size()).sum::<usize>()
+            + self.strings.iter().map(|x| x.get_size()).sum::<usize>();
+
+        round_up(size as u64, 8) as usize
     }
 }
 
@@ -650,7 +665,19 @@ impl NxHeader {
 #[derive(BinRead, Debug)]
 #[br(magic = b"_DIC")]
 struct DictSection {
-    // lol
+    node_count: u32,
+    // TODO: some sort of root node is always included?
+    #[br(count = node_count + 1)]
+    nodes: Vec<DictNode>,
+}
+
+#[derive(Debug, BinRead)]
+struct DictNode {
+    reference: i32,
+    left_index: u16,
+    right_index: u16,
+    #[br(parse_with = FilePtr64::parse)]
+    name: BntxStr,
 }
 
 static DICT_SECTION: &[u8] = b"\x5F\x44\x49\x43\x01\x00\x00\x00\xFF\xFF\xFF\xFF\x01\x00\x00\x00\xB4\x01\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x01\x00\xB8\x01\x00\x00\x00\x00\x00\x00";
@@ -907,23 +934,26 @@ mod tests {
 
     use crate::dds::create_bntx;
     use crate::dds::create_dds;
-    use std::io::BufReader;
     use std::io::BufWriter;
+    use std::io::Write;
 
     #[test]
     fn try_parse() {
-        let mut data = BufReader::new(std::fs::File::open("spirits_0_abra.bntx").unwrap());
-        let test: BntxFile = data.read_le().unwrap();
+        // TODO: Write to file helper function?
+        let original = BntxFile::from_file("chara_1_mario_00.bntx").unwrap();
 
-        let mut writer = BufWriter::new(std::fs::File::create("spirits_0_abra.out.bntx").unwrap());
-        test.write(&mut writer).unwrap();
+        let mut writer =
+            BufWriter::new(std::fs::File::create("chara_1_mario_00.out.bntx").unwrap());
+        original.write(&mut writer).unwrap();
+        writer.flush().unwrap();
 
-        let dds = create_dds(&test).unwrap();
-        let mut writer = BufWriter::new(std::fs::File::create("spirits_0_abra.dds").unwrap());
+        let dds = create_dds(&original).unwrap();
+        let mut writer = BufWriter::new(std::fs::File::create("chara_1_mario_00.dds").unwrap());
         dds.write(&mut writer).unwrap();
 
-        let mut writer = BufWriter::new(std::fs::File::create("spirits_0_abra.dds.bntx").unwrap());
-        create_bntx("spirits_0_abra", &dds)
+        let mut writer =
+            BufWriter::new(std::fs::File::create("chara_1_mario_00.dds.bntx").unwrap());
+        create_bntx("chara_1_mario_00", &dds)
             .unwrap()
             .write(&mut writer)
             .unwrap();
