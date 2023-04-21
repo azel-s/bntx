@@ -2,6 +2,7 @@ use binrw::binread;
 use binrw::binrw;
 use binrw::prelude::*;
 use binrw::BinWrite;
+use binrw::VecArgs;
 use binrw::{FilePtr16, FilePtr32, FilePtr64, NullString};
 use std::convert::TryFrom;
 use std::io::SeekFrom;
@@ -44,38 +45,38 @@ pub struct BntxFile {
 
 impl BntxFile {
     pub fn width(&self) -> u32 {
-        self.nx_header.info_ptr.width
+        self.nx_header.brti.width
     }
 
     pub fn height(&self) -> u32 {
-        self.nx_header.info_ptr.height
+        self.nx_header.brti.height
     }
 
     pub fn depth(&self) -> u32 {
-        self.nx_header.info_ptr.depth
+        self.nx_header.brti.depth
     }
 
     pub fn num_array_layers(&self) -> u32 {
-        self.nx_header.info_ptr.layer_count
+        self.nx_header.brti.layer_count
     }
 
     pub fn num_mipmaps(&self) -> u32 {
-        self.nx_header.info_ptr.mipmap_count as u32
+        self.nx_header.brti.mipmap_count as u32
     }
 
     pub fn image_format(&self) -> SurfaceFormat {
-        self.nx_header.info_ptr.format
+        self.nx_header.brti.format
     }
 
     /// The deswizzled image data for all layers and mipmaps.
     pub fn deswizzled_data(&self) -> Result<Vec<u8>, tegra_swizzle::SwizzleError> {
-        let info = &self.nx_header.info_ptr;
+        let info = &self.nx_header.brti;
 
         deswizzle_surface(
             info.width as usize,
             info.height as usize,
             info.depth as usize,
-            &info.texture.image_data,
+            &self.nx_header.brtd.image_data,
             info.format.block_dim(),
             Some(BlockHeight::new(2u32.pow(info.block_height_log2) as usize).unwrap()),
             info.format.bytes_per_pixel(),
@@ -103,13 +104,11 @@ impl BntxFile {
         )
             .write_options(writer, endian, ())?;
 
-        self.nx_header
-            .info_ptr
-            .write_options(writer, endian, self)?;
+        self.nx_header.brti.write_options(writer, endian, self)?;
 
         vec![0u8; 512].write_options(writer, endian, ())?;
 
-        for offset in &self.nx_header.info_ptr.texture.mipmap_offsets {
+        for offset in &self.nx_header.brti.mipmaps.mipmap_offsets {
             offset.write_options(writer, endian, ())?;
         }
         let mipmaps_offset = writer.stream_position()?;
@@ -117,15 +116,7 @@ impl BntxFile {
         let padding_size = BRTD_SECTION_START as u64 - mipmaps_offset;
         vec![0u8; padding_size as usize].write_options(writer, endian, ())?;
 
-        // BRTD
-        (
-            b"BRTD",
-            0,
-            self.nx_header.info_ptr.texture.image_data.len() as u64 + 0x10,
-        )
-            .write_options(writer, endian, ())?;
-
-        writer.write_all(&self.nx_header.info_ptr.texture.image_data)?;
+        self.nx_header.brtd.write_options(writer, endian, ())?;
 
         self.header
             .inner
@@ -301,7 +292,7 @@ impl BntxFile {
                     nodes: vec![],
                 },
                 dict_size: 0x58,
-                info_ptr: BrtiSection {
+                brti: Brti {
                     size: 3576,
                     size2: 3576,
                     flags: 1,
@@ -324,11 +315,12 @@ impl BntxFile {
                     texture_view_dimension: TextureViewDimension::D2,
                     name_addr: name.to_owned().into(),
                     parent_addr: 32,
-                    texture: Texture {
-                        mipmap_offsets,
-                        image_data: data,
-                    },
+                    mipmaps: Mipmaps { mipmap_offsets },
+                    unk5: 0,
+                    unk6: 0,
+                    unk7: 0,
                 },
+                brtd: Brtd { image_data: data },
             },
         })
     }
@@ -405,7 +397,7 @@ impl BntxHeader {
         parent: &BntxFile,
     ) -> Result<(), binrw::error::Error> {
         let start_of_reloc_section =
-            (START_OF_TEXTURE_DATA + parent.nx_header.info_ptr.texture.image_data.len()) as u32;
+            (START_OF_TEXTURE_DATA + parent.nx_header.brtd.image_data.len()) as u32;
         (
             b"BNTX",
             0u32,
@@ -436,6 +428,8 @@ struct HeaderInner {
     #[br(pad_before = 2, parse_with = FilePtr16::parse)]
     str_section: StrSection,
 
+    // Points to close to the end of the file.
+    // TODO: Does this mean we need at least two passes for offset calculation (size pass -> offset pass)?
     #[br(parse_with = FilePtr32::parse)]
     reloc_table: RelocationTable,
 
@@ -537,6 +531,7 @@ impl StrSection {
     }
 }
 
+// TODO: These all refer to the string dict?
 #[binrw]
 #[derive(Debug)]
 struct BntxStr {
@@ -587,10 +582,10 @@ struct NxHeader {
     count: u32,
 
     #[br(parse_with = read_double_indirect)]
-    info_ptr: BrtiSection,
+    brti: Brti,
 
-    #[br(temp)]
-    data_blk_ptr: u64, // BRTD pointer
+    #[br(parse_with = FilePtr64::parse)]
+    brtd: Brtd,
 
     #[br(parse_with = FilePtr64::parse)]
     dict: DictSection,
@@ -736,7 +731,7 @@ impl SurfaceFormat {
 
 #[derive(BinRead, Debug)]
 #[br(magic = b"BRTI")]
-struct BrtiSection {
+struct Brti {
     size: u32,  // offset?
     size2: u64, // size?
     flags: u8,
@@ -759,14 +754,17 @@ struct BrtiSection {
     texture_view_dimension: TextureViewDimension,
 
     #[br(parse_with = FilePtr64::parse)]
-    name_addr: BntxStr, // u64 pointer to name
+    name_addr: BntxStr,
+
     parent_addr: u64, // pointer to nx header
 
     // TODO: This is a pointer to an array of u64 mipmap offsets.
     // TODO: Parse the entire surface in one vec but store the mipmap offsets?
-    #[br(parse_with = FilePtr64::parse, args { offset: 0, inner: (image_size, mipmap_count)} )]
-    texture: Texture,
-    // TODO: Additional fields?
+    #[br(parse_with = FilePtr64::parse, args { inner: (mipmap_count,)})]
+    mipmaps: Mipmaps, // u64 pointer to mipmap offsets?
+    unk5: u64, // padding?
+    unk6: u64, // offset?
+    unk7: u64, // offset?
 }
 
 #[binrw]
@@ -791,7 +789,7 @@ pub enum TextureViewDimension {
 
 const SIZE_OF_BRTI: usize = 0xA0;
 
-impl BrtiSection {
+impl Brti {
     fn write_options<W: io::Write + io::Seek>(
         &self,
         writer: &mut W,
@@ -846,6 +844,25 @@ impl BrtiSection {
     }
 }
 
+#[binrw]
+#[brw(magic = b"BRTD")]
+struct Brtd {
+    // Size of the image data + BRTD header.
+    #[brw(pad_before = 4)]
+    #[br(temp)]
+    #[bw(calc = image_data.len() as u64 + 16)]
+    brtd_size: u64,
+
+    #[br(count = brtd_size - 16)]
+    image_data: Vec<u8>,
+}
+
+impl fmt::Debug for Brtd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ImageData[{:?}]", self.image_data.len())
+    }
+}
+
 use binrw::io::{Read, Seek};
 
 fn read_double_indirect<'a, T: BinRead, R: Read + Seek>(
@@ -866,22 +883,11 @@ fn read_double_indirect<'a, T: BinRead, R: Read + Seek>(
     Ok(value)
 }
 
-#[derive(BinRead)]
-#[br(import(image_size: u32, mipmap_count: u16))]
-struct Texture {
+#[derive(BinRead, Debug)]
+#[br(import(mipmap_count: u16))]
+struct Mipmaps {
     #[br(count = mipmap_count)]
     mipmap_offsets: Vec<u64>,
-
-    // TODO: Handle the case where the mipmaps are empty.
-    // TODO: Just write a custom parse function?
-    #[br(count = image_size, seek_before = SeekFrom::Start(mipmap_offsets[0]))]
-    image_data: Vec<u8>,
-}
-
-impl fmt::Debug for Texture {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ImageData[{:?}]", self.mipmap_offsets)
-    }
 }
 
 #[cfg(test)]
@@ -895,7 +901,6 @@ mod tests {
     #[test]
     fn try_parse() {
         let original = BntxFile::from_file("chara_1_mario_00.bntx").unwrap();
-
         original.write_to_file("chara_1_mario_00.out.bntx").unwrap();
 
         let dds = create_dds(&original).unwrap();

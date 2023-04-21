@@ -8,20 +8,20 @@ pub fn create_dds(bntx: &BntxFile) -> Result<Dds, tegra_swizzle::SwizzleError> {
     let some_if_above_one = |x| if x > 0 { Some(x) } else { None };
 
     let mut dds = Dds::new_dxgi(NewDxgiParams {
-        height: bntx.nx_header.info_ptr.height,
-        width: bntx.nx_header.info_ptr.width,
-        depth: some_if_above_one(bntx.nx_header.info_ptr.depth),
-        format: bntx.nx_header.info_ptr.format.into(),
-        mipmap_levels: some_if_above_one(bntx.nx_header.info_ptr.mipmap_count as u32),
-        array_layers: some_if_above_one(bntx.nx_header.info_ptr.layer_count),
-        caps2: if bntx.nx_header.info_ptr.depth > 1 {
+        height: bntx.nx_header.brti.height,
+        width: bntx.nx_header.brti.width,
+        depth: some_if_above_one(bntx.nx_header.brti.depth),
+        format: bntx.nx_header.brti.format.into(),
+        mipmap_levels: some_if_above_one(bntx.nx_header.brti.mipmap_count as u32),
+        array_layers: some_if_above_one(bntx.nx_header.brti.layer_count),
+        caps2: if bntx.nx_header.brti.depth > 1 {
             Some(Caps2::VOLUME)
         } else {
             None
         },
-        is_cubemap: bntx.nx_header.info_ptr.layer_count == 6,
+        is_cubemap: bntx.nx_header.brti.layer_count == 6,
         // TODO: Check the dimension instead?
-        resource_dimension: if bntx.nx_header.info_ptr.depth > 1 {
+        resource_dimension: if bntx.nx_header.brti.depth > 1 {
             D3D10ResourceDimension::Texture3D
         } else {
             D3D10ResourceDimension::Texture2D
