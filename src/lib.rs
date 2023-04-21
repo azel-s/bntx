@@ -1,8 +1,9 @@
 use binrw::binread;
 use binrw::binrw;
 use binrw::prelude::*;
-use binrw::{BinWrite, WriteOptions};
+use binrw::BinWrite;
 use binrw::{FilePtr16, FilePtr32, FilePtr64, NullString};
+use std::convert::TryFrom;
 use std::io::SeekFrom;
 use std::path::Path;
 use std::{fmt, io};
@@ -87,9 +88,9 @@ impl BntxFile {
         &self,
         writer: &mut W,
     ) -> Result<(), binrw::error::Error> {
-        let options = binrw::WriteOptions::new(binrw::Endian::Little);
-        self.header.write_options(writer, &options, self)?;
-        self.nx_header.write_options(writer, &options, self)?;
+        let endian = binrw::Endian::Little;
+        self.header.write_options(writer, endian, self)?;
+        self.nx_header.write_options(writer, endian, self)?;
 
         (
             // memory pool
@@ -100,21 +101,21 @@ impl BntxFile {
             &self.header.inner.str_section,
             &self.nx_header.dict,
         )
-            .write_options(writer, &options, ())?;
+            .write_options(writer, endian, ())?;
 
         self.nx_header
             .info_ptr
-            .write_options(writer, &options, self)?;
+            .write_options(writer, endian, self)?;
 
-        vec![0u8; 512].write_options(writer, &options, ())?;
+        vec![0u8; 512].write_options(writer, endian, ())?;
 
         for offset in &self.nx_header.info_ptr.texture.mipmap_offsets {
-            offset.write_options(writer, &options, ())?;
+            offset.write_options(writer, endian, ())?;
         }
         let mipmaps_offset = writer.stream_position()?;
 
         let padding_size = BRTD_SECTION_START as u64 - mipmaps_offset;
-        vec![0u8; padding_size as usize].write_options(writer, &options, ())?;
+        vec![0u8; padding_size as usize].write_options(writer, endian, ())?;
 
         // BRTD
         (
@@ -122,14 +123,14 @@ impl BntxFile {
             0,
             self.nx_header.info_ptr.texture.image_data.len() as u64 + 0x10,
         )
-            .write_options(writer, &options, ())?;
+            .write_options(writer, endian, ())?;
 
         writer.write_all(&self.nx_header.info_ptr.texture.image_data)?;
 
         self.header
             .inner
             .reloc_table
-            .write_options(writer, &options, self)?;
+            .write_options(writer, endian, ())?;
 
         Ok(())
     }
@@ -337,10 +338,9 @@ impl BntxFile {
         reader.read_le()
     }
 
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), binrw::error::Error> {
-        let mut file = std::fs::File::create(path.as_ref())?;
-
-        self.write(&mut file)
+    pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), binrw::error::Error> {
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        self.write(&mut writer)
     }
 }
 
@@ -401,7 +401,7 @@ impl BntxHeader {
     fn write_options<W: io::Write + io::Seek>(
         &self,
         writer: &mut W,
-        options: &WriteOptions,
+        options: binrw::Endian,
         parent: &BntxFile,
     ) -> Result<(), binrw::error::Error> {
         let start_of_reloc_section =
@@ -430,7 +430,7 @@ impl BntxHeader {
 struct HeaderInner {
     revision: u16,
 
-    #[br(parse_with = FilePtr32::parse, map = |x: NullString| x.to_string())]
+    #[br(parse_with = read_string_pointer)]
     file_name: String,
 
     #[br(pad_before = 2, parse_with = FilePtr16::parse)]
@@ -441,6 +441,14 @@ struct HeaderInner {
 
     #[br(temp)]
     file_size: u32,
+}
+
+fn read_string_pointer<'a, R: Read + Seek>(
+    reader: &mut R,
+    endian: binrw::Endian,
+    args: <FilePtr32<NullString> as BinRead>::Args<'a>,
+) -> BinResult<String> {
+    FilePtr32::<NullString>::parse(reader, endian, args).map(|s| s.to_string())
 }
 
 #[derive(BinRead, BinWrite, Debug)]
@@ -464,17 +472,21 @@ struct RelocationEntry {
 
 const SIZE_OF_RELOC_ENTRY: usize = size_of::<u32>() + size_of::<u16>() + (size_of::<u8>() * 2);
 
-#[binread]
+#[binrw]
 #[derive(Debug)]
-#[br(magic = b"_RLT")]
+#[brw(magic = b"_RLT")]
+#[bw(stream = w)]
 struct RelocationTable {
     #[br(temp)]
+    #[bw(calc = w.stream_position().unwrap() as u32 - 4)]
     rlt_section_pos: u32,
 
     #[br(temp)]
+    #[bw(calc = sections.len() as u32)]
     count: u32,
 
     #[br(pad_before = 4, count = count)]
+    #[bw(pad_before = 4)]
     sections: Vec<RelocationSection>,
 
     #[br(count = sections.iter().map(|x| x.count).sum::<u32>())]
@@ -491,23 +503,6 @@ impl RelocationTable {
             + size_of::<u32>()
             + (self.sections.len() * SIZE_OF_RELOC_SECTION)
             + (self.entries.len() * SIZE_OF_RELOC_ENTRY)
-    }
-
-    fn write_options<W: io::Write + io::Seek>(
-        &self,
-        writer: &mut W,
-        options: &WriteOptions,
-        parent: &BntxFile,
-    ) -> Result<(), binrw::error::Error> {
-        (
-            b"_RLT",
-            (START_OF_TEXTURE_DATA + parent.nx_header.info_ptr.texture.image_data.len()) as u32,
-            self.sections.len() as u32,
-            0u32,
-            &self.sections,
-            &self.entries,
-        )
-            .write_options(writer, options, ())
     }
 }
 
@@ -582,6 +577,8 @@ impl From<BntxStr> for String {
     }
 }
 
+// TODO: Rework this to write everything in a single pass.
+// TODO: is there a simple algorithm to calculate the absolute offsets?
 #[binread]
 #[derive(Debug)]
 #[br(magic = b"NX  ")]
@@ -593,18 +590,19 @@ struct NxHeader {
     info_ptr: BrtiSection,
 
     #[br(temp)]
-    data_blk_ptr: u64,
+    data_blk_ptr: u64, // BRTD pointer
 
     #[br(parse_with = FilePtr64::parse)]
     dict: DictSection,
-    dict_size: u64,
+    dict_size: u64, // TODO: How to calculate this
+                    // 136 bytes of padding
 }
 
 impl NxHeader {
     fn write_options<W: io::Write + io::Seek>(
         &self,
         writer: &mut W,
-        options: &WriteOptions,
+        options: binrw::Endian,
         parent: &BntxFile,
     ) -> Result<(), binrw::error::Error> {
         (
@@ -637,6 +635,7 @@ struct DictNode {
     name: BntxStr,
 }
 
+// TODO: Derive binwrite instead.
 static DICT_SECTION: &[u8] = b"\x5F\x44\x49\x43\x01\x00\x00\x00\xFF\xFF\xFF\xFF\x01\x00\x00\x00\xB4\x01\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x01\x00\xB8\x01\x00\x00\x00\x00\x00\x00";
 
 impl DictSection {
@@ -646,15 +645,15 @@ impl DictSection {
 }
 
 impl BinWrite for DictSection {
-    type Args = ();
+    type Args<'a> = ();
 
-    fn write_options<W: io::Write + io::Seek>(
+    fn write_options<W: io::Write + Seek>(
         &self,
         writer: &mut W,
-        options: &WriteOptions,
-        args: Self::Args,
-    ) -> Result<(), binrw::error::Error> {
-        DICT_SECTION.write_options(writer, options, ())
+        endian: binrw::Endian,
+        args: Self::Args<'_>,
+    ) -> BinResult<()> {
+        DICT_SECTION.write_options(writer, endian, args)
     }
 }
 
@@ -765,7 +764,7 @@ struct BrtiSection {
 
     // TODO: This is a pointer to an array of u64 mipmap offsets.
     // TODO: Parse the entire surface in one vec but store the mipmap offsets?
-    #[br(args(image_size, mipmap_count), parse_with = FilePtr64::parse)]
+    #[br(parse_with = FilePtr64::parse, args { offset: 0, inner: (image_size, mipmap_count)} )]
     texture: Texture,
     // TODO: Additional fields?
 }
@@ -796,7 +795,7 @@ impl BrtiSection {
     fn write_options<W: io::Write + io::Seek>(
         &self,
         writer: &mut W,
-        options: &WriteOptions,
+        endian: binrw::Endian,
         parent: &BntxFile,
     ) -> Result<(), binrw::error::Error> {
         (
@@ -843,28 +842,28 @@ impl BrtiSection {
             0u64,
             0u64,
         )
-            .write_options(writer, options, ())
+            .write_options(writer, endian, ())
     }
 }
 
-use binrw::{
-    io::{Read, Seek},
-    ReadOptions,
-};
+use binrw::io::{Read, Seek};
 
-fn read_double_indirect<T: BinRead, R: Read + Seek>(
+fn read_double_indirect<'a, T: BinRead, R: Read + Seek>(
     reader: &mut R,
-    options: &ReadOptions,
-    args: T::Args,
-) -> BinResult<T>
-where
-    T::Args: Copy,
-{
-    let mut data = <FilePtr64<FilePtr64<T>> as BinRead>::read_options(reader, options, args)?;
+    endian: binrw::Endian,
+    args: T::Args<'a>,
+) -> BinResult<T> {
+    let offset1 = <u64>::read_options(reader, endian, ())?;
+    let position = reader.stream_position()?;
 
-    data.after_parse(reader, options, args)?;
+    reader.seek(SeekFrom::Start(offset1))?;
+    let offset2 = <u64>::read_options(reader, endian, ())?;
 
-    Ok(data.into_inner().into_inner())
+    reader.seek(SeekFrom::Start(offset2))?;
+    let value = T::read_options(reader, endian, args)?;
+
+    reader.seek(SeekFrom::Start(position))?;
+    Ok(value)
 }
 
 #[derive(BinRead)]
@@ -892,27 +891,20 @@ mod tests {
     use crate::dds::create_bntx;
     use crate::dds::create_dds;
     use std::io::BufWriter;
-    use std::io::Write;
 
     #[test]
     fn try_parse() {
-        // TODO: Write to file helper function?
         let original = BntxFile::from_file("chara_1_mario_00.bntx").unwrap();
 
-        let mut writer =
-            BufWriter::new(std::fs::File::create("chara_1_mario_00.out.bntx").unwrap());
-        original.write(&mut writer).unwrap();
-        writer.flush().unwrap();
+        original.write_to_file("chara_1_mario_00.out.bntx").unwrap();
 
         let dds = create_dds(&original).unwrap();
         let mut writer = BufWriter::new(std::fs::File::create("chara_1_mario_00.dds").unwrap());
         dds.write(&mut writer).unwrap();
 
-        let mut writer =
-            BufWriter::new(std::fs::File::create("chara_1_mario_00.dds.bntx").unwrap());
         create_bntx("chara_1_mario_00", &dds)
             .unwrap()
-            .write(&mut writer)
+            .write_to_file("chara_1_mario_00.dds.bntx")
             .unwrap();
     }
 }
