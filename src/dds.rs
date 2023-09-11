@@ -1,8 +1,17 @@
 use ddsfile::{
     AlphaMode, Caps2, D3D10ResourceDimension, D3DFormat, Dds, DxgiFormat, FourCC, NewDxgiParams,
 };
+use thiserror::Error;
 
 use crate::{BntxFile, SurfaceFormat};
+
+#[derive(Debug, Error)]
+pub enum CreateBntxError {
+    #[error("failed to swizzle surface")]
+    SwizzleError(#[from] tegra_swizzle::SwizzleError),
+    #[error("the given DDS format is not supported")]
+    UnsupportedImageFormat,
+}
 
 pub fn create_dds(bntx: &BntxFile) -> Result<Dds, tegra_swizzle::SwizzleError> {
     let some_if_above_one = |x| if x > 0 { Some(x) } else { None };
@@ -37,8 +46,7 @@ pub fn create_dds(bntx: &BntxFile) -> Result<Dds, tegra_swizzle::SwizzleError> {
 }
 
 // TODO: Make this a method?
-pub fn create_bntx(name: &str, dds: &Dds) -> Result<BntxFile, tegra_swizzle::SwizzleError> {
-    // TODO: Avoid unwrap.
+pub fn create_bntx(name: &str, dds: &Dds) -> Result<BntxFile, CreateBntxError> {
     BntxFile::from_image_data(
         name,
         dds.get_width(),
@@ -46,9 +54,10 @@ pub fn create_bntx(name: &str, dds: &Dds) -> Result<BntxFile, tegra_swizzle::Swi
         dds.get_depth(),
         dds.get_num_mipmap_levels(),
         layer_count(dds),
-        dds_image_format(dds).unwrap(),
+        dds_image_format(dds).ok_or(CreateBntxError::UnsupportedImageFormat)?,
         &dds.data,
     )
+    .map_err(Into::into)
 }
 
 fn layer_count(dds: &Dds) -> u32 {
