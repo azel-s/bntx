@@ -35,6 +35,7 @@ const BRTD_SECTION_START: usize = 0xFF0;
 const SIZE_OF_BRTD: usize = 0x10;
 const START_OF_TEXTURE_DATA: usize = BRTD_SECTION_START + SIZE_OF_BRTD;
 
+// TODO: Decompile syroot.nintentools.bntx from switch toolbox to figure out how writing works.
 #[derive(BinRead, Debug)]
 pub struct BntxFile {
     header: BntxHeader,
@@ -653,8 +654,7 @@ impl BinWrite for DictSection {
 }
 
 // TODO: Are these flags?
-#[binrw]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, BinRead, BinWrite, Clone, Copy, PartialEq, Eq)]
 #[brw(repr(u32))]
 pub enum SurfaceFormat {
     R8Unorm = 0x0201,
@@ -767,8 +767,7 @@ struct Brti {
     unk7: u64, // offset?
 }
 
-#[binrw]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, BinRead, BinWrite, Clone, Copy, PartialEq, Eq)]
 #[brw(repr(u8))]
 pub enum TextureDimension {
     D1 = 1,
@@ -776,8 +775,7 @@ pub enum TextureDimension {
     D3 = 3,
 }
 
-#[binrw]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, BinRead, BinWrite, Clone, Copy, PartialEq, Eq)]
 #[brw(repr(u32))]
 pub enum TextureViewDimension {
     D1 = 0,
