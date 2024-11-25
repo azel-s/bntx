@@ -540,15 +540,13 @@ struct BntxStr {
     #[bw(calc = chars.len() as u16)]
     len: u16,
 
-    #[br(align_after = 4, count = len, map = |x: Vec<u8>| String::from_utf8_lossy(&x).into_owned())]
-    #[bw(align_after = 4, map = |s| bytes_null_terminated(s))]
+    #[br(count = len, map = |x: Vec<u8>| String::from_utf8_lossy(&x).into_owned())]
+    #[bw(map = |s| s.as_bytes().to_vec())]
     chars: String,
-}
 
-fn bytes_null_terminated(s: &str) -> Vec<u8> {
-    let mut bytes = s.as_bytes().to_vec();
-    bytes.push(0u8);
-    bytes
+    #[br(align_after = 4, temp)]
+    #[bw(align_after = 4, calc = 0u8)]
+    null_terminator: u8,
 }
 
 fn align(x: usize, n: usize) -> usize {
